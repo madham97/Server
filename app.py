@@ -3,9 +3,11 @@ import logging
 import shutil
 import time
 from pathlib import Path
+from datetime import datetime
 from fastapi import FastAPI, UploadFile, File
 
 from inference import process_video, VIDEO_EXTS
+from tracker import TrackerDB, parse_timestamp_from_filename
 
 app = FastAPI()
 
@@ -15,8 +17,13 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
 
 POLL_INTERVAL = 5  # seconds to wait between polling for new files
+DB_PATH = "objects.db"
+MAX_GAP_SECONDS = 300  # max time between video chunks for track linking
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+
+# Global database connection
+db: TrackerDB | None = None
 
 
 @app.post("/upload")
@@ -68,10 +75,25 @@ async def watch_uploads():
                     # run blocking processing in a thread so the event loop isn't blocked
                     await asyncio.to_thread(process_video, str(video_path), project=str(PROCESSED_DIR))
 
-                    # move original into processed directory (ensure no overwrite)
-                    dest = PROCESSED_DIR / video_path.name
+                    # update database with detections from this video
+                    if db is not None:
+                        video_time = parse_timestamp_from_filename(video_path.name)
+                        db.process_yolo_labels_for_video(
+                            str(PROCESSED_DIR),
+                            video_path.stem,
+                            video_path.name,
+                            video_time,
+                            max_gap_seconds=MAX_GAP_SECONDS
+                        )
+                        db.close_inactive_tracks(older_than_seconds=MAX_GAP_SECONDS * 2)
+                        logging.info(f'Updated database for {video_path.name}')
+
+                    # move original into its video subdirectory (ensure no overwrite)
+                    video_subdir = PROCESSED_DIR / video_path.stem
+                    video_subdir.mkdir(exist_ok=True)
+                    dest = video_subdir / video_path.name
                     if dest.exists():
-                        dest = PROCESSED_DIR / f"{video_path.stem}-{int(time.time())}{video_path.suffix}"
+                        dest = video_subdir / f"{video_path.stem}-{int(time.time())}{video_path.suffix}"
                     shutil.move(str(video_path), str(dest))
                     logging.info(f'Moved original to {dest}')
                 except Exception:
@@ -84,6 +106,18 @@ async def watch_uploads():
 
 @app.on_event("startup")
 async def startup_event():
+    global db
+    # Initialize database
+    db = TrackerDB(DB_PATH)
+    logging.info(f'Initialized database: {DB_PATH}')
     # Launch background watcher
     asyncio.create_task(watch_uploads())
     logging.info('Background upload watcher started')
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global db
+    if db is not None:
+        db.close()
+        logging.info('Database closed')
