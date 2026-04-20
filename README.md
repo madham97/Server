@@ -25,7 +25,7 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000
 
 **Expose publicly for GSM devices (no static IP):**
 ```bash
-ngrok http 8000
+ngrok http --scheme=http 8000
 ```
 
 Copy the ngrok URL into `server_url` in the client's `client.json`.
