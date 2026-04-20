@@ -16,7 +16,7 @@ VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.flv', '.webm'}
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 
-def process_video(video_path: str, weights: str = "models/best.pt", project: str = 'processed', device: str = "cuda", conf: float = 0.25, iou: float = 0.45, model: YOLO | None = None):
+def process_video(video_path: str, weights: str = "models/best.pt", project: str = 'processed', device: str = None, conf: float = 0.25, iou: float = 0.45, model: YOLO | None = None):
     """Run YOLO inference on a single video file and save results into `project`.
 
     Returns the YOLO results object.
@@ -31,6 +31,10 @@ def process_video(video_path: str, weights: str = "models/best.pt", project: str
     os.makedirs(project, exist_ok=True)
     video_name = Path(video_path).stem
     video_output_dir = os.path.join(project, video_name)
+
+    if device is None:
+        import torch
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     if model is None:
         logging.info('Loading model...')
