@@ -1,124 +1,130 @@
-# Video Object Tracker
+# Rodent Server
 
-A real-time video processing system that automatically detects and tracks objects across video chunks using YOLOv8. Perfect for surveillance, monitoring, and video analysis applications.
+Receives image and video uploads from Raspberry Pi edge devices over GSM, runs YOLOv8 object detection on video files, and tracks detected objects across sessions in a SQLite database.
 
-## Quick Start
+## Requirements
 
-### 1. Installation
+- Python 3.8+
+- GPU with CUDA recommended for inference (falls back to CPU automatically)
+- ngrok or equivalent for public access from GSM devices
 
-**Prerequisites:**
-- Python 3.7 or higher
-- Git
+## Installation
 
-**Setup:**
 ```bash
-# Clone or download this project
 cd Server
-
-# Create a virtual environment
 python -m venv venv
-
-# Activate it
-# On Windows:
-venv\Scripts\activate
-# On Mac/Linux:
-source venv/bin/activate
-
-# Install dependencies
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Running the Server
+## Running
 
-**Start the API server:**
 ```bash
 python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-You'll see:
-```
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
-
-**Optional: Expose publicly with ngrok:**
+**Expose publicly for GSM devices (no static IP):**
 ```bash
 ngrok http 8000
 ```
 
-This gives you a public URL to access your server from anywhere.
+Copy the ngrok URL into `server_url` in the client's `client.json`.
 
-## Using the Server
+## Endpoints
 
-### Upload Videos
-```bash
-curl -F "video=@your_video.mp4" http://localhost:8000/upload
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/upload` | Receive image or video from a client device |
+| `GET` | `/health` | Liveness check |
+| `GET` | `/config-help` | Interactive SMS config builder for client devices |
+| `GET` | `/docs` | Swagger UI (auto-generated) |
+
+### Upload format
+
+Multipart form POST with the following fields:
+
+| Field | Required | Description |
+|---|---|---|
+| `image` or `video` | Yes | The file (JPEG, WebP, or MP4) |
+| `device_id` | No | Hostname of the sending device |
+| `mode` | No | Recording mode (`image_motion`, `segment`, etc.) |
+| `motion_score` | No | Fraction of pixels that changed (0–1) |
+| `timestamp` | No | UTC capture time (ISO 8601) |
+
+WebP images are automatically converted to JPEG on receipt.
+
+## Upload log
+
+Every received upload is appended to `upload_log.txt` as a tab-separated line:
+
+```
+received_at    filename    device_id    mode    motion_score    capture_timestamp
 ```
 
-Or use the FastAPI Swagger UI at `http://localhost:8000/docs`
-
-### Health Check
-```bash
-curl http://localhost:8000/health
+Example:
+```
+2026-04-20T14:56:23Z	image_20260420T145057Z.jpg	rodent2	image_motion	0.065	2026-04-20T14:50:58Z
 ```
 
-## How It Works
+## Video processing pipeline
 
-1. **Upload** - Place video files in the `uploads/` folder or use the `/upload` endpoint
-2. **Process** - The system automatically detects objects using YOLOv8 AI model
-3. **Track** - Objects are tracked across video frames and linked across sequential chunks
-4. **Store** - Results are saved in an SQLite database (`objects.db`)
-5. **Query** - Inspect tracked objects using the database
+1. Uploaded videos land in `uploads/`
+2. A background watcher polls every 5 seconds
+3. Stable files are processed with YOLOv8 (`models/best.pt`)
+4. Detection labels are written to `processed/{video_name}/labels/`
+5. Object tracks are linked across video chunks using IoU matching
+6. Results are stored in `objects.db`
+7. Original video is moved to `processed/{video_name}/`
 
-## File Naming Convention
+### File naming convention
 
-Video filenames should include timestamps in this format:
+Video filenames should embed a UTC timestamp for correct chronological ordering:
+
 ```
 video_YYYYMMDDThhmmssZ_[number].mp4
 ```
 
-Example: `video_20260103T112511Z_100.mp4`
+Example: `video_20260420T145057Z_1.mp4`
 
-This ensures videos are processed in chronological order for accurate track linking.
+## Database
 
-## Folder Structure
+SQLite database at `objects.db` with three tables:
 
-```
-uploads/                      - Drop video files here for processing
-processed/
-├── {video_name}/            - One folder per video
-│   ├── labels/              - Detection labels per frame
-│   │   ├── {video}_1.txt
-│   │   ├── {video}_2.txt
-│   │   └── ...
-│   └── {video}.avi          - Processed video with detections
-├── {another_video}/
-│   ├── labels/
-│   └── ...
-models/
-└── best.pt                  - YOLOv8 model weights
-objects.db                   - SQLite database with tracked objects
-```
+| Table | Description |
+|---|---|
+| `objects` | Persistent tracked entities with first/last seen times and confidence |
+| `sightings` | Individual per-frame detections with bounding box and confidence |
+| `active_tracks` | Current track state used to link detections across video chunks |
 
-## Advanced Usage
+Inspect the database:
 
-**Inspect tracked objects:**
 ```bash
 python inspect_db.py --db objects.db
 ```
 
-**Process videos manually:**
-```bash
-python inference.py uploads --project processed
+## SMS config helper
+
+Open `http://<server>/config-help` in a browser to build config patch SMS messages for client devices interactively. Select a config key, enter a value, and copy the JSON to send as a text to the device's SIM number.
+
+## Folder structure
+
+```
+uploads/          Incoming files (cleared after processing)
+processed/
+  {video_name}/
+    labels/       YOLO detection label files per frame
+    {video}.avi   Annotated output video
+models/
+  best.pt         YOLOv8 weights
+objects.db        Tracked object database
+upload_log.txt    Tab-separated upload history
 ```
 
 ## Troubleshooting
 
-- **"Module not found" error** - Make sure virtual environment is activated and dependencies installed
-- **Port 8000 already in use** - Change port: `--port 8001`
-- **Videos not processing** - Check filenames include proper timestamp format
-- **Database locked** - Ensure only one server instance is running
-
-## Support
-
-For issues or questions, check the configuration in `app.py` or adjust tracking thresholds in `tracker.py`
+| Symptom | Check |
+|---|---|
+| Videos not processing | Filename includes timestamp? Check server logs |
+| No detections | `models/best.pt` present? Confidence threshold in `inference.py` |
+| Database locked | Only one server instance running? |
+| Port in use | `--port 8001` to use a different port |
