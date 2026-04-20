@@ -3,7 +3,7 @@ import logging
 import shutil
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
 from inference import process_video, VIDEO_EXTS
@@ -68,7 +68,7 @@ async def upload(
     logging.info(f"Received upload: {filename}" +
                  (f" [{', '.join(meta_parts)}]" if meta_parts else ""))
 
-    received_at = datetime.now(datetime.UTC).strftime('%Y-%m-%dT%H:%M:%SZ')
+    received_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     with open(UPLOAD_LOG, 'a') as f:
         f.write(f"{received_at}\t{filename}\t{device_id or ''}\t{mode or ''}\t{motion_score or ''}\t{timestamp or ''}\n")
 
