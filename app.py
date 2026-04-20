@@ -1,9 +1,10 @@
 import asyncio
+import json
 import logging
 import shutil
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import FastAPI, UploadFile, File, HTTPException
 
 from inference import process_video, VIDEO_EXTS
@@ -19,6 +20,7 @@ PROCESSED_DIR.mkdir(exist_ok=True)
 POLL_INTERVAL = 5  # seconds to wait between polling for new files
 DB_PATH = "objects.db"
 MAX_GAP_SECONDS = 300  # max time between video chunks for track linking
+UPLOAD_LOG = Path("upload_log.txt")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -52,7 +54,35 @@ async def upload(
 
     file_path = UPLOAD_DIR / filename
     file_path.write_bytes(data)
-    logging.info(f"Received upload: {filename}")
+
+    # Read and delete companion JSON (same stem) if present
+    meta = {}
+    json_path = UPLOAD_DIR / (Path(filename).stem + '.json')
+    if json_path.exists():
+        try:
+            meta = json.loads(json_path.read_text())
+        except Exception:
+            logging.warning(f"Could not parse metadata JSON: {json_path.name}")
+        json_path.unlink()
+
+    device_id = meta.get('device_id', '')
+    mode = meta.get('mode', '')
+    motion_score = meta.get('motion_score', '')
+    timestamp = meta.get('timestamp', '')
+
+    meta_parts = [p for p in [
+        device_id,
+        mode,
+        f"motion={motion_score}" if motion_score else None,
+        timestamp,
+    ] if p]
+    logging.info(f"Received upload: {filename}" +
+                 (f" [{', '.join(meta_parts)}]" if meta_parts else ""))
+
+    received_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    with open(UPLOAD_LOG, 'a') as f:
+        f.write(f"{received_at}\t{filename}\t{device_id}\t{mode}\t{motion_score}\t{timestamp}\n")
+
     return {"status": "ok"}
 
 
