@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
 from inference import process_video, VIDEO_EXTS
 from tracker import TrackerDB, parse_timestamp_from_filename
@@ -15,6 +15,8 @@ UPLOAD_DIR = Path("uploads")
 PROCESSED_DIR = Path("processed")
 UPLOAD_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
+
+UPLOAD_LOG = Path("upload_log.txt")
 
 POLL_INTERVAL = 5  # seconds to wait between polling for new files
 DB_PATH = "objects.db"
@@ -33,6 +35,10 @@ import io
 async def upload(
     video: UploadFile = File(None),
     image: UploadFile = File(None),
+    timestamp: str = Form(None),
+    mode: str = Form(None),
+    motion_score: str = Form(None),
+    device_id: str = Form(None),
 ):
     file = video or image
     if file is None:
@@ -52,7 +58,20 @@ async def upload(
 
     file_path = UPLOAD_DIR / filename
     file_path.write_bytes(data)
-    logging.info(f"Received upload: {filename}")
+
+    meta_parts = [p for p in [
+        device_id,
+        mode,
+        f"motion={motion_score}" if motion_score else None,
+        timestamp,
+    ] if p]
+    logging.info(f"Received upload: {filename}" +
+                 (f" [{', '.join(meta_parts)}]" if meta_parts else ""))
+
+    received_at = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    with open(UPLOAD_LOG, 'a') as f:
+        f.write(f"{received_at}\t{filename}\t{device_id or ''}\t{mode or ''}\t{motion_score or ''}\t{timestamp or ''}\n")
+
     return {"status": "ok"}
 
 
