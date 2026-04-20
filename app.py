@@ -4,7 +4,7 @@ import shutil
 import time
 from pathlib import Path
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 
 from inference import process_video, VIDEO_EXTS
 from tracker import TrackerDB, parse_timestamp_from_filename
@@ -26,15 +26,35 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 db: TrackerDB | None = None
 
 
+from PIL import Image as PILImage
+import io
+
 @app.post("/upload")
 async def upload(
-    video: UploadFile = File(...),
+    video: UploadFile = File(None),
+    image: UploadFile = File(None),
 ):
-    video_path = UPLOAD_DIR / video.filename
-    with open(video_path, "wb") as f:
-        shutil.copyfileobj(video.file, f)
-    logging.info(f"Received upload: {video.filename}")
+    file = video or image
+    if file is None:
+        raise HTTPException(status_code=422, detail="No file provided")
+
+    data = await file.read()
+
+    # Convert WebP to JPEG transparently
+    if file.filename.lower().endswith('.webp'):
+        img = PILImage.open(io.BytesIO(data))
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=95)
+        data = buf.getvalue()
+        filename = Path(file.filename).stem + '.jpg'
+    else:
+        filename = file.filename
+
+    file_path = UPLOAD_DIR / filename
+    file_path.write_bytes(data)
+    logging.info(f"Received upload: {filename}")
     return {"status": "ok"}
+
 
 
 @app.get("/health")
