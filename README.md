@@ -1,124 +1,130 @@
-# Video Object Tracker
+# Monitoring Pipeline — Server
 
-A real-time video processing system that automatically detects and tracks objects across video chunks using YOLOv8. Perfect for surveillance, monitoring, and video analysis applications.
+Receives images from Raspberry Pi field devices, runs YOLOv8 object detection on each image, and persists detection results in a SQLite database with cross-image track linking.
 
-## Quick Start
+## Setup
 
-### 1. Installation
+**Requirements:** Python 3.10+, a YOLO model weights file at `models/best.pt`.
 
-**Prerequisites:**
-- Python 3.7 or higher
-- Git
-
-**Setup:**
 ```bash
-# Clone or download this project
 cd Server
-
-# Create a virtual environment
-python -m venv venv
-
-# Activate it
-# On Windows:
-venv\Scripts\activate
-# On Mac/Linux:
+python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Running the Server
+## Running
 
-**Start the API server:**
 ```bash
-python -m uvicorn app:app --host 0.0.0.0 --port 8000
+uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-You'll see:
-```
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000
-```
-
-**Optional: Expose publicly with ngrok:**
+Expose publicly (e.g. for a Pi on cellular):
 ```bash
-ngrok http 8000
+ngrok http --scheme http 8000
 ```
 
-This gives you a public URL to access your server from anywhere.
+## Endpoints
 
-## Using the Server
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/upload` | Receive an image from a client device |
+| `GET` | `/health` | Liveness check |
+| `GET` | `/processing` | Check whether inference is enabled |
+| `POST` | `/processing?enabled=true\|false` | Toggle inference on/off at runtime |
 
-### Upload Videos
+### Upload fields
+
+The `/upload` endpoint accepts `multipart/form-data` with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `image` | file | JPEG or PNG (WebP is accepted and converted to JPEG) |
+| `device_id` | text | Identifier of the sending device |
+| `mode` | text | Recording mode (`image_motion`, `image_interval`) |
+| `motion_score` | text | Motion ratio that triggered capture (motion mode only) |
+| `timestamp` | text | ISO 8601 capture time |
+
+Example:
 ```bash
-curl -F "video=@your_video.mp4" http://localhost:8000/upload
+curl -X POST http://localhost:8000/upload \
+  -F "image=@image_20260103T112511Z.jpg" \
+  -F "device_id=pi-barn" \
+  -F "mode=image_motion" \
+  -F "motion_score=0.042" \
+  -F "timestamp=2026-01-03T11:25:11Z"
 ```
 
-Or use the FastAPI Swagger UI at `http://localhost:8000/docs`
+## Processing pipeline
 
-### Health Check
+1. Client POSTs an image → saved to `uploads/`
+2. Background watcher detects the new file
+3. When `ENABLE_PROCESSING=true`, runs YOLOv8 inference via `process_image()`
+4. Detection labels saved to `processed/{image_name}/labels/`
+5. Annotated image saved to `processed/{image_name}/`
+6. `TrackerDB` links detections to existing or new objects across images
+7. Original image moved to `processed/{image_name}/`
+
+If processing is disabled, images accumulate in `uploads/` until you re-enable it.
+
+Files that fail inference 3 times are moved to `failed/` to prevent an infinite retry loop.
+
+## Controlling inference
+
+Disable at startup:
 ```bash
-curl http://localhost:8000/health
+ENABLE_PROCESSING=false uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-## How It Works
-
-1. **Upload** - Place video files in the `uploads/` folder or use the `/upload` endpoint
-2. **Process** - The system automatically detects objects using YOLOv8 AI model
-3. **Track** - Objects are tracked across video frames and linked across sequential chunks
-4. **Store** - Results are saved in an SQLite database (`objects.db`)
-5. **Query** - Inspect tracked objects using the database
-
-## File Naming Convention
-
-Video filenames should include timestamps in this format:
-```
-video_YYYYMMDDThhmmssZ_[number].mp4
+Toggle at runtime without restarting:
+```bash
+curl -X POST "http://localhost:8000/processing?enabled=false"
+curl -X POST "http://localhost:8000/processing?enabled=true"
 ```
 
-Example: `video_20260103T112511Z_100.mp4`
-
-This ensures videos are processed in chronological order for accurate track linking.
-
-## Folder Structure
+## Folder structure
 
 ```
-uploads/                      - Drop video files here for processing
+uploads/          — incoming images waiting to be processed
 processed/
-├── {video_name}/            - One folder per video
-│   ├── labels/              - Detection labels per frame
-│   │   ├── {video}_1.txt
-│   │   ├── {video}_2.txt
-│   │   └── ...
-│   └── {video}.avi          - Processed video with detections
-├── {another_video}/
-│   ├── labels/
-│   └── ...
+  {image_name}/
+    labels/       — YOLO detection labels (.txt)
+    {image}.jpg   — annotated image
+failed/           — images that could not be processed after 3 attempts
 models/
-└── best.pt                  - YOLOv8 model weights
-objects.db                   - SQLite database with tracked objects
+  best.pt         — YOLOv8 model weights
+objects.db        — SQLite tracking database
+upload_log.txt    — TSV log of every received upload
 ```
 
-## Advanced Usage
+## Image filename convention
 
-**Inspect tracked objects:**
+Filenames should embed a UTC timestamp so the tracker can order them correctly:
+```
+image_YYYYMMDDThhmmssZ.jpg
+```
+Example: `image_20260103T112511Z.jpg`
+
+The recorder on the Pi generates this format automatically.
+
+## Utilities
+
+**Inspect the tracking database:**
 ```bash
-python inspect_db.py --db objects.db
+python inspect_db.py
 ```
 
-**Process videos manually:**
+**Batch-process a directory of images manually:**
 ```bash
-python inference.py uploads --project processed
+python inference.py uploads/ --project processed --db objects.db
 ```
 
 ## Troubleshooting
 
-- **"Module not found" error** - Make sure virtual environment is activated and dependencies installed
-- **Port 8000 already in use** - Change port: `--port 8001`
-- **Videos not processing** - Check filenames include proper timestamp format
-- **Database locked** - Ensure only one server instance is running
-
-## Support
-
-For issues or questions, check the configuration in `app.py` or adjust tracking thresholds in `tracker.py`
+| Symptom | Fix |
+|---------|-----|
+| Images not processed | Check `GET /processing` — inference may be disabled |
+| CUDA errors | Server auto-detects GPU; if none is available it falls back to CPU |
+| Image stuck in `uploads/` after 3 errors | Check `failed/` folder and server logs |
+| Port conflict | Change port: `uvicorn app:app --port 8001` |
+| Database locked | Ensure only one server instance is running |
