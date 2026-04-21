@@ -1,74 +1,80 @@
 import asyncio
-import json
+import io
 import logging
+import os
 import shutil
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime, timezone
-from fastapi import FastAPI, UploadFile, File, HTTPException
 
-from inference import process_video, VIDEO_EXTS
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from PIL import Image as PILImage
+
+from inference import process_image, IMAGE_EXTS
 from tracker import TrackerDB, parse_timestamp_from_filename
-
-app = FastAPI()
 
 UPLOAD_DIR = Path("uploads")
 PROCESSED_DIR = Path("processed")
+FAILED_DIR = Path("failed")
 UPLOAD_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
 
-POLL_INTERVAL = 5  # seconds to wait between polling for new files
+POLL_INTERVAL = 5
 DB_PATH = "objects.db"
-MAX_GAP_SECONDS = 300  # max time between video chunks for track linking
+MAX_GAP_SECONDS = 300
+MAX_PROCESS_ATTEMPTS = 3
 UPLOAD_LOG = Path("upload_log.txt")
+
+# Set ENABLE_PROCESSING=false env var to receive images without running inference.
+# Toggle at runtime via POST /processing?enabled=true|false
+ENABLE_PROCESSING: bool = os.getenv("ENABLE_PROCESSING", "true").lower() in ("1", "true", "yes")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-# Global database connection
 db: TrackerDB | None = None
+_failed_counts: dict[str, int] = {}
 
 
-from PIL import Image as PILImage
-import io
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db
+    db = TrackerDB(DB_PATH)
+    logging.info(f'Initialized database: {DB_PATH}')
+    asyncio.create_task(watch_uploads())
+    logging.info('Background upload watcher started')
+    yield
+    if db is not None:
+        db.close()
+        logging.info('Database closed')
+
+
+app = FastAPI(lifespan=lifespan)
+
 
 @app.post("/upload")
 async def upload(
-    video: UploadFile = File(None),
     image: UploadFile = File(None),
+    device_id: str = Form(""),
+    mode: str = Form(""),
+    motion_score: str = Form(""),
+    timestamp: str = Form(""),
 ):
-    file = video or image
-    if file is None:
+    if image is None:
         raise HTTPException(status_code=422, detail="No file provided")
 
-    data = await file.read()
+    data = await image.read()
 
-    # Convert WebP to JPEG transparently
-    if file.filename.lower().endswith('.webp'):
+    if image.filename.lower().endswith('.webp'):
         img = PILImage.open(io.BytesIO(data))
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=95)
         data = buf.getvalue()
-        filename = Path(file.filename).stem + '.jpg'
+        filename = Path(image.filename).stem + '.jpg'
     else:
-        filename = file.filename
+        filename = image.filename
 
-    file_path = UPLOAD_DIR / filename
-    file_path.write_bytes(data)
-
-    # Read and delete companion JSON (same stem) if present
-    meta = {}
-    json_path = UPLOAD_DIR / (Path(filename).stem + '.json')
-    if json_path.exists():
-        try:
-            meta = json.loads(json_path.read_text())
-        except Exception:
-            logging.warning(f"Could not parse metadata JSON: {json_path.name}")
-        json_path.unlink()
-
-    device_id = meta.get('device_id', '')
-    mode = meta.get('mode', '')
-    motion_score = meta.get('motion_score', '')
-    timestamp = meta.get('timestamp', '')
+    (UPLOAD_DIR / filename).write_bytes(data)
 
     meta_parts = [p for p in [
         device_id,
@@ -86,14 +92,25 @@ async def upload(
     return {"status": "ok"}
 
 
-
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
 
+@app.get("/processing")
+async def get_processing():
+    return {"enabled": ENABLE_PROCESSING}
+
+
+@app.post("/processing")
+async def set_processing(enabled: bool):
+    global ENABLE_PROCESSING
+    ENABLE_PROCESSING = enabled
+    logging.info(f"Processing {'enabled' if enabled else 'disabled'}")
+    return {"enabled": ENABLE_PROCESSING}
+
+
 async def _is_file_stable(path: Path, wait: float = 1.0) -> bool:
-    """Ensure file size isn't changing (simple protection against incomplete uploads)."""
     try:
         size1 = path.stat().st_size
     except FileNotFoundError:
@@ -107,67 +124,61 @@ async def _is_file_stable(path: Path, wait: float = 1.0) -> bool:
 
 
 async def watch_uploads():
-    """Background task: poll the uploads folder, process new videos alphabetically, and move originals to processed."""
     logging.info('Starting uploads watcher')
     while True:
         try:
-            # gather files matching known extensions, sorted alphabetically
-            files = sorted([p for p in UPLOAD_DIR.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS])
-            for video_path in files:
-                # check file is stable (likely finished uploading)
-                stable = await _is_file_stable(video_path)
-                if not stable:
-                    logging.info(f'Skipping unstable file: {video_path.name}')
-                    continue
-
-                logging.info(f'Processing {video_path.name}...')
-                try:
-                    # run blocking processing in a thread so the event loop isn't blocked
-                    await asyncio.to_thread(process_video, str(video_path), project=str(PROCESSED_DIR))
-
-                    # update database with detections from this video
-                    if db is not None:
-                        video_time = parse_timestamp_from_filename(video_path.name)
-                        db.process_yolo_labels_for_video(
-                            str(PROCESSED_DIR),
-                            video_path.stem,
-                            video_path.name,
-                            video_time,
-                            max_gap_seconds=MAX_GAP_SECONDS
+            if ENABLE_PROCESSING:
+                files = sorted([
+                    p for p in UPLOAD_DIR.iterdir()
+                    if p.is_file() and p.suffix.lower() in IMAGE_EXTS
+                ])
+                for file_path in files:
+                    fail_count = _failed_counts.get(file_path.name, 0)
+                    if fail_count >= MAX_PROCESS_ATTEMPTS:
+                        FAILED_DIR.mkdir(exist_ok=True)
+                        dest = FAILED_DIR / file_path.name
+                        shutil.move(str(file_path), str(dest))
+                        logging.warning(
+                            f"Moved permanently failed file to failed/: {file_path.name} "
+                            f"({fail_count} attempts)"
                         )
-                        db.close_inactive_tracks(older_than_seconds=MAX_GAP_SECONDS * 2)
-                        logging.info(f'Updated database for {video_path.name}')
+                        del _failed_counts[file_path.name]
+                        continue
 
-                    # move original into its video subdirectory (ensure no overwrite)
-                    video_subdir = PROCESSED_DIR / video_path.stem
-                    video_subdir.mkdir(exist_ok=True)
-                    dest = video_subdir / video_path.name
-                    if dest.exists():
-                        dest = video_subdir / f"{video_path.stem}-{int(time.time())}{video_path.suffix}"
-                    shutil.move(str(video_path), str(dest))
-                    logging.info(f'Moved original to {dest}')
-                except Exception:
-                    logging.exception(f'Failed to process {video_path.name}')
+                    stable = await _is_file_stable(file_path)
+                    if not stable:
+                        logging.info(f'Skipping unstable file: {file_path.name}')
+                        continue
+
+                    logging.info(f'Processing {file_path.name}...')
+                    try:
+                        await asyncio.to_thread(process_image, str(file_path), project=str(PROCESSED_DIR))
+
+                        if db is not None:
+                            image_time = parse_timestamp_from_filename(file_path.name)
+                            db.process_yolo_labels_for_video(
+                                str(PROCESSED_DIR),
+                                file_path.stem,
+                                file_path.name,
+                                image_time,
+                                max_gap_seconds=MAX_GAP_SECONDS
+                            )
+                            db.close_inactive_tracks(older_than_seconds=MAX_GAP_SECONDS * 2)
+                            logging.info(f'Updated database for {file_path.name}')
+
+                        _failed_counts.pop(file_path.name, None)
+
+                        file_subdir = PROCESSED_DIR / file_path.stem
+                        file_subdir.mkdir(exist_ok=True)
+                        dest = file_subdir / file_path.name
+                        if dest.exists():
+                            dest = file_subdir / f"{file_path.stem}-{int(time.time())}{file_path.suffix}"
+                        shutil.move(str(file_path), str(dest))
+                        logging.info(f'Moved original to {dest}')
+                    except Exception:
+                        logging.exception(f'Failed to process {file_path.name}')
+                        _failed_counts[file_path.name] = _failed_counts.get(file_path.name, 0) + 1
         except Exception:
             logging.exception('Error while watching uploads')
 
         await asyncio.sleep(POLL_INTERVAL)
-
-
-@app.on_event("startup")
-async def startup_event():
-    global db
-    # Initialize database
-    db = TrackerDB(DB_PATH)
-    logging.info(f'Initialized database: {DB_PATH}')
-    # Launch background watcher
-    asyncio.create_task(watch_uploads())
-    logging.info('Background upload watcher started')
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    global db
-    if db is not None:
-        db.close()
-        logging.info('Database closed')

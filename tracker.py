@@ -2,7 +2,7 @@ import os
 import re
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
 
 
@@ -211,8 +211,9 @@ class TrackerDB:
             first = sightings[0]
             last = sightings[-1]
             # choose time = video_time if available
-            time_iso = video_time.isoformat() if video_time else datetime.utcnow().isoformat()
-            matched = self.match_active(first['bbox'], first['class'], video_time or datetime.utcnow(), max_gap_seconds=max_gap_seconds)
+            _now = datetime.now(timezone.utc).replace(tzinfo=None)
+            time_iso = video_time.isoformat() if video_time else _now.isoformat()
+            matched = self.match_active(first['bbox'], first['class'], video_time or _now, max_gap_seconds=max_gap_seconds)
             if matched is None:
                 # create new object
                 obj_id = self._insert_object(first['class'], time_iso, first['conf'])
@@ -227,7 +228,7 @@ class TrackerDB:
     def close_inactive_tracks(self, older_than_seconds: int = 600):
         c = self._conn.cursor()
         rows = c.execute('SELECT * FROM active_tracks').fetchall()
-        cutoff = datetime.utcnow() - timedelta(seconds=older_than_seconds)
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=older_than_seconds)
         for r in rows:
             try:
                 last_seen = datetime.fromisoformat(r['last_seen'])
@@ -242,7 +243,7 @@ class TrackerDB:
 if __name__ == '__main__':
     # small smoke test
     db = TrackerDB(':memory:')
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     obj = db._insert_object(0, now.isoformat(), 0.8)
     db.add_sighting(obj, 'video_20260103T112511Z.mp4', 1, (0.5, 0.5, 0.1, 0.1), 0.8, 0, now.isoformat())
     db.update_active_track(obj, 'video_20260103T112511Z.mp4', 100, (0.5, 0.5, 0.1, 0.1), now.isoformat(), 0.8)
