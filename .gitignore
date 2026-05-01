@@ -1,6 +1,15 @@
 uploads/
 processed/
 failed/
+dataset/
+annotated/
+runs/
+models/runs/
+models/archive/
+models/candidate.pt
+models/best.pt
 __pycache__/
+*.pt
 upload_log.txt
 processed_log.txt
+annotation_log.txt

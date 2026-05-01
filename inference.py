@@ -2,10 +2,11 @@ import os
 import sys
 import logging
 from pathlib import Path
-from datetime import datetime
 
 import torch
 from ultralytics import YOLO
+
+from config import MODEL_WEIGHTS, MODEL_CONF, MODEL_IOU, MODEL_IMGSZ, PROCESSED_DIR
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -16,9 +17,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 _DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def process_image(image_path: str, weights: str = "models/best.pt", project: str = 'processed',
-                  device: str = _DEFAULT_DEVICE, conf: float = 0.25, iou: float = 0.45,
-                  model: YOLO | None = None):
+def process_image(image_path: str, weights: str = MODEL_WEIGHTS, project: str = str(PROCESSED_DIR),
+                  device: str = _DEFAULT_DEVICE, conf: float = MODEL_CONF, iou: float = MODEL_IOU,
+                  imgsz: int = MODEL_IMGSZ, model: YOLO | None = None):
     """Run YOLO inference on a single image and save results into `project`."""
     if not os.path.exists(weights):
         raise FileNotFoundError(f'Weights file not found: {weights}')
@@ -35,7 +36,7 @@ def process_image(image_path: str, weights: str = "models/best.pt", project: str
     logging.info(f'Running inference on {image_path}...')
     results = model.predict(
         source=image_path,
-        imgsz=640,
+        imgsz=imgsz,
         device=device,
         conf=conf,
         iou=iou,

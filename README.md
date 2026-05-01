@@ -1,15 +1,16 @@
 # Monitoring Pipeline — Server
 
-Receives images from Raspberry Pi field devices, runs YOLOv8 object detection on each image, and persists detection results in a SQLite database with cross-image track linking.
+Receives images from Raspberry Pi field devices, runs YOLOv8 object detection, and provides an annotation + training pipeline for building custom detection models.
 
 ## Setup
 
-**Requirements:** Python 3.10+, a YOLO model weights file at `models/best.pt`.
+**Requirements:** Python 3.13, CUDA-capable GPU recommended.
 
 ```bash
 cd Server
-python3 -m venv venv
+py -3.13 -m venv venv
 venv\Scripts\activate
+pip install torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu126
 pip install -r requirements.txt
 ```
 
@@ -26,105 +27,110 @@ ngrok http --scheme http 8000
 
 ## Endpoints
 
+### Device upload
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/upload` | Receive an image from a client device |
 | `GET` | `/health` | Liveness check |
 | `GET` | `/processing` | Check whether inference is enabled |
-| `POST` | `/processing?enabled=true\|false` | Toggle inference on/off at runtime |
-
-### Upload fields
 
 The `/upload` endpoint accepts `multipart/form-data` with:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `image` | file | JPEG or PNG (WebP is accepted and converted to JPEG) |
+| `image` | file | JPEG or PNG (WebP accepted and converted) |
 | `device_id` | text | Identifier of the sending device |
 | `mode` | text | Recording mode (`image_motion`, `image_interval`) |
-| `motion_score` | text | Motion ratio that triggered capture (motion mode only) |
+| `motion_score` | text | Motion ratio that triggered capture |
 | `timestamp` | text | ISO 8601 capture time |
 
-Example:
-```bash
-curl -X POST http://localhost:8000/upload \
-  -F "image=@image_20260103T112511Z.jpg" \
-  -F "device_id=pi-barn" \
-  -F "mode=image_motion" \
-  -F "motion_score=0.042" \
-  -F "timestamp=2026-01-03T11:25:11Z"
-```
+### Annotation
 
-## Processing pipeline
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/annotate` | Open annotation UI in browser |
+| `GET` | `/annotate/next` | Next random unannotated image + class list |
+| `GET` | `/annotate/specific/{image_name}` | Load a specific image by name |
+| `GET` | `/annotate/image/{image_name}` | Serve raw image file |
+| `POST` | `/annotate/{image_name}` | Save labels for an image |
+| `GET` | `/annotate/stats` | Pending count, annotated count, per-class totals |
 
-1. Client POSTs an image → saved to `uploads/`
-2. Background watcher detects the new file
-3. When `ENABLE_PROCESSING=true`, runs YOLOv8 inference via `process_image()`
-4. Detection labels saved to `processed/{image_name}/labels/`
-5. Annotated image saved to `processed/{image_name}/`
-6. `TrackerDB` links detections to existing or new objects across images
-7. Original image moved to `processed/{image_name}/`
+### Dataset & training
 
-If processing is disabled, images accumulate in `uploads/` until you re-enable it.
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/dataset/export` | Export annotated images to YOLO training format |
+| `GET` | `/dataset/stats` | Current dataset export state |
+| `POST` | `/train/start` | Start training in the background |
+| `GET` | `/train/status` | Current epoch, metrics, state |
+| `POST` | `/train/promote` | Promote candidate model to `models/best.pt` |
 
-Files that fail inference 3 times are moved to `failed/` to prevent an infinite retry loop.
+## Training workflow
 
-## Controlling inference
+1. Annotate images at `http://localhost:8000/annotate`
+2. Export dataset: `POST /dataset/export?val_split=0.2`
+3. Start training: `POST /train/start?epochs=100&imgsz=640`
+4. Monitor: `GET /train/status`
+5. Promote: `POST /train/promote` (requires mAP50 ≥ 0.3)
 
-Disable at startup:
-```bash
-ENABLE_PROCESSING=false uvicorn app:app --host 0.0.0.0 --port 8000
-```
+Training parameters (`POST /train/start`):
 
-Toggle at runtime without restarting:
-```bash
-curl -X POST "http://localhost:8000/processing?enabled=false"
-curl -X POST "http://localhost:8000/processing?enabled=true"
-```
+| Param | Default | Description |
+|-------|---------|-------------|
+| `base_model` | `yolov8n.pt` | Base YOLO checkpoint to train from |
+| `epochs` | `100` | Number of training epochs |
+| `imgsz` | `640` | Input image size (square) |
 
 ## Folder structure
 
 ```
-uploads/          — incoming images waiting to be processed
-processed/
-  {image_name}/
-    labels/       — YOLO detection labels (.txt)
-    {image}.jpg   — annotated image
-failed/           — images that could not be processed after 3 attempts
+app.py                  — FastAPI entry point, background watcher
+config.py               — All configuration
+state.py                — Shared watcher state
+trainer.py              — YOLO training logic
+inference.py            — YOLO inference wrapper
+routers/
+  upload.py             — POST /upload
+  annotate.py           — /annotate/* endpoints
+  export.py             — /dataset/* endpoints
+  train.py              — /train/* endpoints
+static/
+  annotate.html         — Annotation UI
+classes.json            — Class definitions (rat, human)
 models/
-  best.pt         — YOLOv8 model weights
-objects.db        — SQLite tracking database
-upload_log.txt    — TSV log of every received upload
+  best.pt               — Live model weights (gitignored)
+  candidate.pt          — Staged model after training (gitignored)
+  runs/                 — Training run outputs (gitignored)
+  archive/              — Superseded model versions (gitignored)
+uploads/                — All received images (gitignored)
+processed/              — YOLO inference outputs (gitignored)
+annotated/              — Human-confirmed label files (gitignored)
+dataset/                — Exported training dataset (gitignored)
 ```
 
-## Image filename convention
+## Configuration
 
-Filenames should embed a UTC timestamp so the tracker can order them correctly:
-```
-image_YYYYMMDDThhmmssZ.jpg
-```
-Example: `image_20260103T112511Z.jpg`
+All settings are in `config.py`:
 
-The recorder on the Pi generates this format automatically.
-
-## Utilities
-
-**Inspect the tracking database:**
-```bash
-python inspect_db.py
-```
-
-**Batch-process a directory of images manually:**
-```bash
-python inference.py uploads/ --project processed --db objects.db
-```
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ENABLE_PROCESSING` | `False` | Toggle inference on/off |
+| `POLL_INTERVAL` | `5` | Seconds between watcher cycles |
+| `MAX_PROCESS_ATTEMPTS` | `3` | Retries before moving to `failed/` |
+| `BASE_MODEL` | `yolov8n.pt` | Default base model for training |
+| `TRAIN_EPOCHS` | `100` | Default training epochs |
+| `TRAIN_IMGSZ` | `640` | Default training image size |
+| `MIN_MAP` | `0.3` | Minimum mAP50 required for promotion |
+| `MODEL_CONF` | `0.25` | Inference confidence threshold |
+| `MODEL_IOU` | `0.45` | Inference IOU threshold |
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| Images not processed | Check `GET /processing` — inference may be disabled |
-| CUDA errors | Server auto-detects GPU; if none is available it falls back to CPU |
-| Image stuck in `uploads/` after 3 errors | Check `failed/` folder and server logs |
-| Port conflict | Change port: `uvicorn app:app --port 8001` |
-| Database locked | Ensure only one server instance is running |
+| Images not processed | Check `ENABLE_PROCESSING` in `config.py` |
+| Training fails immediately | Windows DataLoader issue — `workers=0` is set by default |
+| YOLO saves to `runs/detect/...` | Ensure trainer uses absolute project path (already fixed) |
+| Port conflict | `uvicorn app:app --port 8001` |
+| CUDA not detected | Reinstall PyTorch with CUDA: `pip install torch --index-url https://download.pytorch.org/whl/nightly/cu126` |
