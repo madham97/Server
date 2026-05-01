@@ -6,7 +6,6 @@ from datetime import datetime
 
 import torch
 from ultralytics import YOLO
-from tracker import TrackerDB, parse_timestamp_from_filename
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -58,33 +57,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('path', nargs='?', default='uploads', help='Image file or directory to process')
     parser.add_argument('--project', default='processed')
-    parser.add_argument('--db', default='objects.db')
-    parser.add_argument('--max-gap', type=int, default=300)
     args = parser.parse_args()
 
     path = Path(args.path)
     if not path.exists():
         raise SystemExit(f'Path not found: {path}')
 
-    db = TrackerDB(args.db)
     logging.info('Loading YOLO model for batch processing...')
     model = YOLO("models/best.pt")
 
-    try:
-        if path.is_dir():
-            files = sorted([p for p in path.iterdir() if p.suffix.lower() in IMAGE_EXTS and p.is_file()])
-            for p in files:
-                ts = parse_timestamp_from_filename(p.name)
-                logging.info(f'Processing {p.name} (ts={ts})')
-                process_image(str(p), project=args.project, model=model)
-                db.process_yolo_labels_for_video(args.project, p.stem, p.name, ts, max_gap_seconds=args.max_gap)
-                db.close_inactive_tracks(older_than_seconds=args.max_gap * 2)
-        else:
-            ts = parse_timestamp_from_filename(path.name)
-            process_image(str(path), project=args.project, model=model)
-            db.process_yolo_labels_for_video(args.project, path.stem, path.name, ts, max_gap_seconds=args.max_gap)
-    finally:
-        db.close()
+    if path.is_dir():
+        files = sorted([p for p in path.iterdir() if p.suffix.lower() in IMAGE_EXTS and p.is_file()])
+        for p in files:
+            logging.info(f'Processing {p.name}')
+            process_image(str(p), project=args.project, model=model)
+    else:
+        process_image(str(path), project=args.project, model=model)
 
 
 if __name__ == '__main__':

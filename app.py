@@ -1,52 +1,61 @@
 import asyncio
 import io
 import logging
-import os
-import shutil
-import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from PIL import Image as PILImage
 
 from inference import process_image, IMAGE_EXTS
-from tracker import TrackerDB, parse_timestamp_from_filename
+from config import (
+    ENABLE_PROCESSING,
+    UPLOAD_DIR,
+    PROCESSED_DIR,
+    FAILED_DIR,
+    POLL_INTERVAL,
+    MAX_PROCESS_ATTEMPTS,
+    UPLOAD_LOG,
+    PROCESSED_LOG,
+)
 
-UPLOAD_DIR = Path("uploads")
-PROCESSED_DIR = Path("processed")
-FAILED_DIR = Path("failed")
 UPLOAD_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
 
-POLL_INTERVAL = 5
-DB_PATH = "objects.db"
-MAX_GAP_SECONDS = 300
-MAX_PROCESS_ATTEMPTS = 3
-UPLOAD_LOG = Path("upload_log.txt")
-
-# Set ENABLE_PROCESSING=false env var to receive images without running inference.
-# Toggle at runtime via POST /processing?enabled=true|false
-ENABLE_PROCESSING: bool = os.getenv("ENABLE_PROCESSING", "true").lower() in ("1", "true", "yes")
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
-db: TrackerDB | None = None
 _failed_counts: dict[str, int] = {}
+_processed: set[str] = set()
+
+
+def _load_processed_log() -> set[str]:
+    if not PROCESSED_LOG.exists():
+        return set()
+    names = set()
+    with open(PROCESSED_LOG) as f:
+        for line in f:
+            parts = line.strip().split('\t')
+            if parts:
+                names.add(parts[-1])
+    return names
+
+
+def _record_processed(filename: str):
+    processed_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    with open(PROCESSED_LOG, 'a') as f:
+        f.write(f"{processed_at}\t{filename}\n")
+    _processed.add(filename)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db
-    db = TrackerDB(DB_PATH)
-    logging.info(f'Initialized database: {DB_PATH}')
+    global _processed
+    _processed = _load_processed_log()
+    logging.info(f'Loaded {len(_processed)} entries from processed log')
     asyncio.create_task(watch_uploads())
     logging.info('Background upload watcher started')
     yield
-    if db is not None:
-        db.close()
-        logging.info('Database closed')
 
 
 app = FastAPI(lifespan=lifespan)
@@ -102,14 +111,6 @@ async def get_processing():
     return {"enabled": ENABLE_PROCESSING}
 
 
-@app.post("/processing")
-async def set_processing(enabled: bool):
-    global ENABLE_PROCESSING
-    ENABLE_PROCESSING = enabled
-    logging.info(f"Processing {'enabled' if enabled else 'disabled'}")
-    return {"enabled": ENABLE_PROCESSING}
-
-
 async def _is_file_stable(path: Path, wait: float = 1.0) -> bool:
     try:
         size1 = path.stat().st_size
@@ -133,11 +134,14 @@ async def watch_uploads():
                     if p.is_file() and p.suffix.lower() in IMAGE_EXTS
                 ])
                 for file_path in files:
+                    if file_path.name in _processed:
+                        continue
+
                     fail_count = _failed_counts.get(file_path.name, 0)
                     if fail_count >= MAX_PROCESS_ATTEMPTS:
                         FAILED_DIR.mkdir(exist_ok=True)
                         dest = FAILED_DIR / file_path.name
-                        shutil.move(str(file_path), str(dest))
+                        file_path.rename(dest)
                         logging.warning(
                             f"Moved permanently failed file to failed/: {file_path.name} "
                             f"({fail_count} attempts)"
@@ -153,28 +157,9 @@ async def watch_uploads():
                     logging.info(f'Processing {file_path.name}...')
                     try:
                         await asyncio.to_thread(process_image, str(file_path), project=str(PROCESSED_DIR))
-
-                        if db is not None:
-                            image_time = parse_timestamp_from_filename(file_path.name)
-                            db.process_yolo_labels_for_video(
-                                str(PROCESSED_DIR),
-                                file_path.stem,
-                                file_path.name,
-                                image_time,
-                                max_gap_seconds=MAX_GAP_SECONDS
-                            )
-                            db.close_inactive_tracks(older_than_seconds=MAX_GAP_SECONDS * 2)
-                            logging.info(f'Updated database for {file_path.name}')
-
                         _failed_counts.pop(file_path.name, None)
-
-                        file_subdir = PROCESSED_DIR / file_path.stem
-                        file_subdir.mkdir(exist_ok=True)
-                        dest = file_subdir / file_path.name
-                        if dest.exists():
-                            dest = file_subdir / f"{file_path.stem}-{int(time.time())}{file_path.suffix}"
-                        shutil.move(str(file_path), str(dest))
-                        logging.info(f'Moved original to {dest}')
+                        _record_processed(file_path.name)
+                        logging.info(f'Recorded {file_path.name} in processed log')
                     except Exception:
                         logging.exception(f'Failed to process {file_path.name}')
                         _failed_counts[file_path.name] = _failed_counts.get(file_path.name, 0) + 1

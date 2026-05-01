@@ -9,7 +9,7 @@ Receives images from Raspberry Pi field devices, runs YOLOv8 object detection on
 ```bash
 cd Server
 python3 -m venv venv
-source venv/bin/activate
+venv\Scripts\activate
 pip install -r requirements.txt
 ```
 

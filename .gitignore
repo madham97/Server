@@ -1,3 +1,6 @@
 uploads/
 processed/
+failed/
 __pycache__/
+upload_log.txt
+processed_log.txt
