@@ -34,6 +34,7 @@ ngrok http --scheme http 8000
 | `POST` | `/upload` | Receive an image from a client device |
 | `GET` | `/health` | Liveness check |
 | `GET` | `/processing` | Check whether inference is enabled |
+| `POST` | `/processing?enabled=true\|false` | Enable or disable background inference at runtime |
 
 The `/upload` endpoint accepts `multipart/form-data` with:
 
@@ -55,6 +56,12 @@ The `/upload` endpoint accepts `multipart/form-data` with:
 | `GET` | `/annotate/image/{image_name}` | Serve raw image file |
 | `POST` | `/annotate/{image_name}` | Save labels for an image |
 | `GET` | `/annotate/stats` | Pending count, annotated count, per-class totals |
+
+### Inference
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/infer/test?n=5` | Run inference on `n` random images from `uploads/` |
 
 ### Dataset & training
 
@@ -95,6 +102,7 @@ routers/
   annotate.py           — /annotate/* endpoints
   export.py             — /dataset/* endpoints
   train.py              — /train/* endpoints
+  infer.py              — /infer/* endpoints
 static/
   annotate.html         — Annotation UI
 classes.json            — Class definitions (rat, human)
@@ -115,7 +123,6 @@ All settings are in `config.py`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `ENABLE_PROCESSING` | `False` | Toggle inference on/off |
 | `POLL_INTERVAL` | `5` | Seconds between watcher cycles |
 | `MAX_PROCESS_ATTEMPTS` | `3` | Retries before moving to `failed/` |
 | `BASE_MODEL` | `yolov8n.pt` | Default base model for training |
@@ -129,7 +136,7 @@ All settings are in `config.py`:
 
 | Symptom | Fix |
 |---------|-----|
-| Images not processed | Check `ENABLE_PROCESSING` in `config.py` |
+| Images not processed | Call `POST /processing?enabled=true` to enable background inference |
 | Training fails immediately | Windows DataLoader issue — `workers=0` is set by default |
 | YOLO saves to `runs/detect/...` | Ensure trainer uses absolute project path (already fixed) |
 | Port conflict | `uvicorn app:app --port 8001` |

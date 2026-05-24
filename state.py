@@ -4,6 +4,7 @@ from config import PROCESSED_LOG
 
 _processed: set[str] = set()
 _failed_counts: dict[str, int] = {}
+processing_enabled: bool = False
 
 
 def load_processed_log() -> set[str]:

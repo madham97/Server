@@ -7,7 +7,6 @@ from fastapi import FastAPI
 
 from inference import process_image, IMAGE_EXTS
 from config import (
-    ENABLE_PROCESSING,
     UPLOAD_DIR,
     PROCESSED_DIR,
     ANNOTATED_DIR,
@@ -19,7 +18,7 @@ from config import (
     MODEL_IOU,
 )
 import state
-from routers import upload, annotate, export, train
+from routers import upload, annotate, export, train, infer
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
@@ -42,6 +41,7 @@ app.include_router(upload.router)
 app.include_router(annotate.router)
 app.include_router(export.router)
 app.include_router(train.router)
+app.include_router(infer.router)
 
 
 @app.get("/health")
@@ -51,7 +51,13 @@ async def health():
 
 @app.get("/processing")
 async def get_processing():
-    return {"enabled": ENABLE_PROCESSING}
+    return {"enabled": state.processing_enabled}
+
+
+@app.post("/processing")
+async def set_processing(enabled: bool):
+    state.processing_enabled = enabled
+    return {"enabled": state.processing_enabled}
 
 
 async def _is_file_stable(path: Path, wait: float = 1.0) -> bool:
@@ -71,7 +77,7 @@ async def watch_uploads():
     logging.info('Starting uploads watcher')
     while True:
         try:
-            if ENABLE_PROCESSING:
+            if state.processing_enabled:
                 files = sorted([
                     p for p in UPLOAD_DIR.iterdir()
                     if p.is_file() and p.suffix.lower() in IMAGE_EXTS

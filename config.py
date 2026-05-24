@@ -1,23 +1,22 @@
 from pathlib import Path
 
-# Configuration for inference processing
-ENABLE_PROCESSING = False
-
 # Directory configuration
-UPLOAD_DIR = Path("uploads")
-PROCESSED_DIR = Path("processed")
-ANNOTATED_DIR = Path("annotated")
-FAILED_DIR = Path("failed")
+_BASE = Path(__file__).parent
+
+UPLOAD_DIR = _BASE / "uploads"
+PROCESSED_DIR = _BASE / "processed"
+ANNOTATED_DIR = _BASE / "annotated"
+FAILED_DIR = _BASE / "failed"
 
 # Processing configuration
 POLL_INTERVAL = 5
 MAX_PROCESS_ATTEMPTS = 3
-UPLOAD_LOG = Path("upload_log.txt")
-PROCESSED_LOG = Path("processed_log.txt")
-ANNOTATION_LOG = Path("annotation_log.txt")
+UPLOAD_LOG = _BASE / "upload_log.txt"
+PROCESSED_LOG = _BASE / "processed_log.txt"
+ANNOTATION_LOG = _BASE / "annotation_log.txt"
 
 # Model configuration
-MODEL_WEIGHTS = "models/best.pt"
+MODEL_WEIGHTS = str(_BASE / "models/best.pt")
 MODEL_CONF = 0.25
 MODEL_IOU = 0.45
 MODEL_IMGSZ = 640
