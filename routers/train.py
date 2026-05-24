@@ -5,13 +5,12 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 import trainer
-from config import BASE_MODEL, TRAIN_EPOCHS, TRAIN_IMGSZ, MODEL_WEIGHTS, MIN_MAP
+from config import BASE_MODEL, TRAIN_EPOCHS, TRAIN_IMGSZ, MODEL_WEIGHTS, MIN_MAP, DATASET_DIR, CANDIDATE_WEIGHTS, ARCHIVE_DIR
 
 router = APIRouter(prefix="/train")
 
-DATASET_YAML = Path("dataset/dataset.yaml")
-CANDIDATE = Path("models/candidate.pt")
-ARCHIVE_DIR = Path("models/archive")
+DATASET_YAML = DATASET_DIR / "dataset.yaml"
+CANDIDATE = CANDIDATE_WEIGHTS
 
 
 @router.post("/start")

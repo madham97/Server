@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from config import UPLOAD_DIR, ANNOTATED_DIR, ANNOTATION_LOG
+from config import UPLOAD_DIR, ANNOTATED_DIR, ANNOTATION_LOG, CLASSES_FILE
 from inference import IMAGE_EXTS
 
 router = APIRouter(prefix="/annotate")
@@ -20,7 +20,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 async def annotate_ui():
     return FileResponse(str(STATIC_DIR / "annotate.html"))
 
-with open("classes.json") as f:
+with open(CLASSES_FILE) as f:
     CLASSES: list[str] = json.load(f)["classes"]
 
 

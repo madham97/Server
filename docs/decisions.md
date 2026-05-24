@@ -86,6 +86,20 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 ---
 
+### Incomplete relative-path fix (fixed)
+
+**What happened:** When `config.py` was updated to use `__file__`-anchored paths, the routers (`train.py`, `export.py`) and `trainer.py` were not updated. They still used `Path("dataset")`, `Path("models/candidate.pt")`, etc., relative to CWD. Additionally, both `annotate.py` and `export.py` opened `classes.json` as a bare relative path at module import time.
+
+**Fix:** Added `DATASET_DIR`, `CLASSES_FILE`, `CANDIDATE_WEIGHTS`, `ARCHIVE_DIR`, and `TRAINING_RUNS_DIR` to `config.py`. All routers and `trainer.py` now import these constants. `open("classes.json")` replaced with `open(CLASSES_FILE)` in both routers.
+
+### Export hardcoded `.jpg` extension (fixed)
+
+**What happened:** `export.py` looked up `UPLOAD_DIR / f"{stem}.jpg"` to find the source image for each annotated entry. Images uploaded as `.png` or `.jpeg` would match annotations in `annotated/` but their source file would not be found, silently dropping them from the export.
+
+**Fix:** Now searches across `IMAGE_EXTS` using `next(... for ext in IMAGE_EXTS if path.exists(), None)`.
+
+---
+
 ### Static `ENABLE_PROCESSING` config flag
 
 **What it was:** A boolean constant `ENABLE_PROCESSING = False` in `config.py` that controlled whether the background watcher ran inference.

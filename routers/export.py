@@ -1,17 +1,15 @@
 import json
 import shutil
 import random
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from config import UPLOAD_DIR, ANNOTATED_DIR
+from config import UPLOAD_DIR, ANNOTATED_DIR, DATASET_DIR, CLASSES_FILE
+from inference import IMAGE_EXTS
 
 router = APIRouter(prefix="/dataset")
 
-DATASET_DIR = Path("dataset")
-
-with open("classes.json") as f:
+with open(CLASSES_FILE) as f:
     CLASSES: list[str] = json.load(f)["classes"]
 
 
@@ -27,9 +25,13 @@ async def export_dataset(val_split: float = 0.2):
     # Verify source images exist
     entries = []
     for d in annotated_dirs:
-        image_path = UPLOAD_DIR / f"{d.name}.jpg"
         label_path = d / "labels" / f"{d.name}.txt"
-        if image_path.exists() and label_path.exists():
+        image_path = next(
+            (UPLOAD_DIR / f"{d.name}{ext}" for ext in IMAGE_EXTS
+             if (UPLOAD_DIR / f"{d.name}{ext}").exists()),
+            None,
+        )
+        if image_path is not None and label_path.exists():
             entries.append((image_path, label_path))
 
     if not entries:

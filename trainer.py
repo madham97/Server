@@ -1,9 +1,10 @@
 import shutil
 import threading
 from datetime import datetime
-from pathlib import Path
 
 from ultralytics import YOLO
+
+from config import TRAINING_RUNS_DIR, CANDIDATE_WEIGHTS
 
 _status: dict = {
     "state": "idle",   # idle | running | complete | failed
@@ -44,9 +45,8 @@ def start_training(base_model: str, epochs: int, imgsz: int, dataset_yaml: str) 
 
 def _run(base_model: str, epochs: int, imgsz: int, dataset_yaml: str):
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-    project_dir = Path("models/runs").resolve()
-    project_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = project_dir / timestamp
+    TRAINING_RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    run_dir = TRAINING_RUNS_DIR / timestamp
 
     with _lock:
         _status["run_dir"] = str(run_dir)
@@ -68,7 +68,7 @@ def _run(base_model: str, epochs: int, imgsz: int, dataset_yaml: str):
             data=dataset_yaml,
             epochs=epochs,
             imgsz=imgsz,
-            project=str(project_dir),
+            project=str(TRAINING_RUNS_DIR),
             name=timestamp,
             exist_ok=True,
             workers=0,
@@ -76,8 +76,8 @@ def _run(base_model: str, epochs: int, imgsz: int, dataset_yaml: str):
 
         best_pt = run_dir / "weights" / "best.pt"
         if best_pt.exists():
-            Path("models").mkdir(exist_ok=True)
-            shutil.copy2(best_pt, "models/candidate.pt")
+            CANDIDATE_WEIGHTS.parent.mkdir(exist_ok=True)
+            shutil.copy2(best_pt, CANDIDATE_WEIGHTS)
 
         with _lock:
             _status["state"] = "complete"

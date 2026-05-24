@@ -15,8 +15,15 @@ UPLOAD_LOG = _BASE / "upload_log.txt"
 PROCESSED_LOG = _BASE / "processed_log.txt"
 ANNOTATION_LOG = _BASE / "annotation_log.txt"
 
+# Dataset
+DATASET_DIR = _BASE / "dataset"
+CLASSES_FILE = _BASE / "classes.json"
+
 # Model configuration
 MODEL_WEIGHTS = str(_BASE / "models/best.pt")
+CANDIDATE_WEIGHTS = _BASE / "models" / "candidate.pt"
+ARCHIVE_DIR = _BASE / "models" / "archive"
+TRAINING_RUNS_DIR = _BASE / "models" / "runs"
 MODEL_CONF = 0.25
 MODEL_IOU = 0.45
 MODEL_IMGSZ = 640
