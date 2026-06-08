@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multimodal Wildlife Monitoring Pipeline — Heidelberg Zoo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: Arial, sans-serif;
+    background: #1a1a1a;
+    color: #222;
+  }
+
+  /* -- Navigation dots -- */
+  #nav {
+    position: fixed;
+    right: 18px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 100;
+  }
+  #nav a {
+    display: block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.3);
+    transition: background 0.2s;
+  }
+  #nav a.active, #nav a:hover { background: #fff; }
+
+  /* -- Slides -- */
+  .slide {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 60px 80px;
+    scroll-snap-align: start;
+    position: relative;
+  }
+
+  html { scroll-snap-type: y mandatory; overflow-y: scroll; }
+
+  /* -- Colour themes per slide -- */
+  .slide-cover   { background: linear-gradient(135deg, #1b4332 0%, #2d6a4f 100%); color: #fff; }
+  .slide-agenda  { background: #f8f9fa; }
+  .slide-why     { background: #fff; }
+  .slide-overview{ background: #f0f7f0; }
+  .slide-device  { background: #fff; }
+  .slide-remote  { background: #f0f7f0; }
+  .slide-pipeline{ background: #fff; }
+  .slide-model   { background: #f0f7f0; }
+  .slide-annotation { background: #fff; }
+  .slide-results { background: #f0f7f0; }
+  .slide-detections { background: #fff; }
+  .slide-live    { background: #f0f7f0; }
+  .slide-needs   { background: #fff; }
+  .slide-placement { background: #f0f7f0; }
+  .slide-next    { background: #fff; }
+  .slide-summary { background: linear-gradient(135deg, #1b4332 0%, #2d6a4f 100%); color: #fff; }
+  .slide-questions { background: #fff; }
+  .slide-thanks  { background: linear-gradient(135deg, #1b4332 0%, #2d6a4f 100%); color: #fff; }
+  .slide-appendix { background: #f8f9fa; }
+
+  /* -- Slide number badge -- */
+  .slide-num {
+    position: absolute;
+    bottom: 22px;
+    right: 32px;
+    font-size: 13px;
+    opacity: 0.4;
+    font-weight: bold;
+    letter-spacing: 1px;
+  }
+  .slide-cover .slide-num, .slide-summary .slide-num, .slide-thanks .slide-num { color: #fff; }
+
+  /* -- Typography -- */
+  h1 {
+    font-size: 46px;
+    line-height: 1.15;
+    margin-bottom: 16px;
+    color: inherit;
+  }
+  h2 {
+    font-size: 32px;
+    color: #1b4332;
+    margin-bottom: 24px;
+    padding-bottom: 8px;
+    border-bottom: 3px solid #2d6a4f;
+    display: inline-block;
+  }
+  .slide-summary h2, .slide-thanks h2 { color: #a8d5b5; border-color: #a8d5b5; }
+  .subtitle {
+    font-size: 20px;
+    opacity: 0.8;
+    margin-bottom: 12px;
+  }
+  .meta { font-size: 16px; opacity: 0.65; margin-top: 24px; }
+
+  p { font-size: 18px; line-height: 1.65; margin-bottom: 14px; }
+
+  ul, ol { padding-left: 22px; }
+  li { font-size: 18px; line-height: 1.65; margin-bottom: 8px; }
+
+  /* -- Callout box -- */
+  .callout {
+    background: #f0f7f0;
+    border-left: 4px solid #2d6a4f;
+    padding: 14px 20px;
+    border-radius: 0 6px 6px 0;
+    margin-top: 20px;
+    font-size: 17px;
+    line-height: 1.6;
+  }
+  .callout strong { color: #1b4332; }
+  .slide-summary .callout, .slide-thanks .callout {
+    background: rgba(255,255,255,0.12);
+    border-color: #a8d5b5;
+    color: #fff;
+  }
+
+  /* -- Tables -- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 18px;
+    font-size: 17px;
+  }
+  th {
+    background: #2d6a4f;
+    color: #fff;
+    padding: 10px 16px;
+    text-align: left;
+    font-weight: 600;
+  }
+  td {
+    padding: 9px 16px;
+    border-bottom: 1px solid #e0e0e0;
+  }
+  tr:nth-child(even) td { background: #f8faf8; }
+
+  /* -- Diagram / pipeline -- */
+  .pipeline {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin-top: 10px;
+    max-width: 700px;
+  }
+  .pipeline-step {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 18px;
+    background: #fff;
+    border: 1px solid #c8e6c9;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    font-size: 17px;
+  }
+  .pipeline-step .icon { font-size: 26px; min-width: 36px; text-align: center; }
+  .pipeline-arrow { text-align: left; padding-left: 34px; color: #2d6a4f; font-size: 20px; line-height: 1; }
+
+  /* -- Two-column layout -- */
+  .cols { display: flex; gap: 40px; margin-top: 16px; }
+  .col { flex: 1; }
+
+  /* -- Highlight number -- */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-top: 20px;
+  }
+  .stat-box {
+    background: #fff;
+    border: 1px solid #c8e6c9;
+    border-radius: 10px;
+    padding: 20px 24px;
+    text-align: center;
+  }
+  .stat-box .number {
+    font-size: 42px;
+    font-weight: bold;
+    color: #2d6a4f;
+    line-height: 1.1;
+  }
+  .stat-box .label { font-size: 15px; color: #555; margin-top: 6px; }
+
+  /* -- Screenshot placeholder -- */
+  .screenshot-placeholder {
+    width: 100%;
+    min-height: 220px;
+    background: #e8f5e9;
+    border: 2px dashed #81c784;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #388e3c;
+    font-size: 15px;
+    margin-top: 20px;
+    text-align: center;
+    padding: 20px;
+  }
+
+  /* -- Tag badges -- */
+  .badge {
+    display: inline-block;
+    background: #2d6a4f;
+    color: #fff;
+    padding: 3px 12px;
+    border-radius: 20px;
+    font-size: 14px;
+    margin: 3px 2px;
+  }
+
+  /* -- Agenda list -- */
+  .agenda-list {
+    list-style: none;
+    padding: 0;
+    margin-top: 10px;
+    counter-reset: agenda;
+  }
+  .agenda-list li {
+    counter-increment: agenda;
+    padding: 10px 14px;
+    border-bottom: 1px solid #e8e8e8;
+    font-size: 19px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .agenda-list li::before {
+    content: counter(agenda);
+    background: #2d6a4f;
+    color: #fff;
+    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: bold;
+    flex-shrink: 0;
+  }
+
+  /* -- Checklist -- */
+  .checklist { list-style: none; padding: 0; }
+  .checklist li { padding: 6px 0 6px 28px; position: relative; }
+  .checklist li::before { content: "✓"; color: #2d6a4f; font-weight: bold; font-size: 18px; position: absolute; left: 0; top: 7px; }
+  .slide-summary .checklist li::before, .slide-thanks .checklist li::before { color: #a8d5b5; }
+
+  /* -- Cover subtitle line -- */
+  .cover-line {
+    width: 60px;
+    height: 4px;
+    background: #a8d5b5;
+    margin: 18px 0;
+    border-radius: 2px;
+  }
+
+  @media (max-width: 700px) {
+    .slide { padding: 40px 24px; }
+    h1 { font-size: 30px; }
+    h2 { font-size: 22px; }
+    .cols { flex-direction: column; }
+    .stat-grid { grid-template-columns: 1fr; }
+    #nav { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Navigation dots -->
+<div id="nav">
+  <a href="#s1" title="Cover"></a>
+  <a href="#s2" title="Agenda"></a>
+  <a href="#s3" title="Why automate?"></a>
+  <a href="#s4m" title="Multimodal innovation"></a>
+  <a href="#s4" title="System overview"></a>
+  <a href="#s5" title="Field device"></a>
+  <a href="#s6" title="Remote management"></a>
+  <a href="#s7" title="Server pipeline"></a>
+  <a href="#s8" title="AI model"></a>
+  <a href="#s9" title="Annotation tool"></a>
+  <a href="#s10" title="Results"></a>
+  <a href="#s11" title="Example detections"></a>
+  <a href="#s12" title="Live today"></a>
+  <a href="#s13" title="What we need"></a>
+  <a href="#s14" title="Placement plan"></a>
+  <a href="#s15" title="Next steps"></a>
+  <a href="#s16" title="Summary"></a>
+</div>
+
+<!-- =
+     SLIDE 1 — COVER
+= -->
+<section class="slide slide-cover" id="s1">
+  <div style="max-width:800px;">
+    <p class="subtitle">Heidelberg Zoo Collaboration — Project Update</p>
+    <h1>Multimodal Wildlife<br>Monitoring Pipeline</h1>
+    <div class="cover-line"></div>
+    <p style="font-size:19px; opacity:0.85; line-height:1.7;">
+      Combining infrared and thermal cameras with AI to automatically detect rodents
+      in the wild — running unattended over cellular data.
+    </p>
+    <p class="meta">8 July 2025 &nbsp;·&nbsp; 11:00 CEST<br>
+    Contact: hammad.aamer97@gmail.com</p>
+  </div>
+  <span class="slide-num">1 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 2 — AGENDA
+= -->
+<section class="slide slide-agenda" id="s2">
+  <h2>Agenda</h2>
+  <ol class="agenda-list">
+    <li>Why automate monitoring?</li>
+    <li>The research innovation — multimodal detection</li>
+    <li>What we built — system overview</li>
+    <li>The field device</li>
+    <li>How images are processed on the server</li>
+    <li>The AI detection model</li>
+    <li>Results so far</li>
+    <li>What we need from you</li>
+    <li>Next steps &amp; discussion</li>
+  </ol>
+  <span class="slide-num">2 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 3 — WHY AUTOMATE
+= -->
+<section class="slide slide-why" id="s3">
+  <h2>Why Automate Monitoring?</h2>
+  <div class="cols">
+    <div class="col">
+      <p><strong>Manual monitoring is difficult:</strong></p>
+      <ul>
+        <li>Animals are active at unpredictable hours — often overnight</li>
+        <li>Large areas to cover with limited staff time</li>
+        <li>Reviewing hours of footage is slow and expensive</li>
+        <li>Human presence can disturb animal behaviour</li>
+      </ul>
+    </div>
+    <div class="col">
+      <p><strong>What automation gives us:</strong></p>
+      <ul>
+        <li>24/7 coverage with no ongoing effort</li>
+        <li>Instant detection, no footage to review manually</li>
+        <li>Objective, timestamped records</li>
+        <li>A system that improves over time as it sees more data</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout">
+    <strong>Our goal:</strong> Deploy a low-cost, always-on camera system that automatically
+    automatically detects <strong>rodents</strong> in field footage —
+    and gets smarter with every image it sees.
+  </div>
+  <span class="slide-num">3 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 4 — MULTIMODAL INNOVATION
+= -->
+<section class="slide slide-why" id="s4m">
+  <h2>The Research Innovation — Multimodal Detection</h2>
+  <div class="cols" style="gap:48px; align-items:flex-start; margin-top:8px;">
+    <div class="col">
+      <p>Most wildlife monitoring systems use a single camera type. We use <strong>two cameras simultaneously, pointing at the same scene:</strong></p>
+      <br>
+      <div class="pipeline-step" style="margin-bottom:12px; background:#f0f7f0;">
+        <span class="icon">&#x1F4F7;</span>
+        <div>
+          <strong>Infrared (NIR) camera</strong><br>
+          <span style="font-size:15px; color:#555;">Captures detail, texture and shape in low-light conditions. Works like a standard camera but sensitive beyond visible light — effective at dusk, dawn, and in dimly lit enclosures.</span>
+        </div>
+      </div>
+      <div class="pipeline-step" style="background:#f0f7f0;">
+        <span class="icon">&#x1F321;&#xFE0F;</span>
+        <div>
+          <strong>Thermal camera</strong><br>
+          <span style="font-size:15px; color:#555;">Detects heat signatures rather than reflected light. Works in complete darkness, through light vegetation, and is unaffected by shadows or camouflage. A warm animal is always visible.</span>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <p><strong>Why combine them?</strong></p>
+      <ul style="margin-top:8px;">
+        <li>Thermal finds the animal — even in the dark or when hidden</li>
+        <li>Infrared provides the detail needed to identify the species</li>
+        <li>Each modality compensates for the other's weaknesses</li>
+        <li>Together they should outperform either camera alone</li>
+      </ul>
+      <br>
+      <p><strong>Our research question:</strong></p>
+      <div class="callout" style="margin-top:0;">
+        Does fusing infrared and thermal images improve rodent detection accuracy
+        compared to using either sensor alone? And under which conditions does each modality
+        contribute most?
+      </div>
+    </div>
+  </div>
+  <span class="slide-num">4 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 5 — SYSTEM OVERVIEW
+= -->
+<section class="slide slide-overview" id="s4">
+  <h2>System Overview</h2>
+  <div class="cols" style="align-items:flex-start; gap:60px;">
+    <div class="col" style="flex:1.1;">
+      <div class="pipeline">
+        <div class="pipeline-step">
+          <span class="icon">&#x1F4F7;</span>
+          <span><strong>Camera (Raspberry Pi)</strong><br>
+          <span style="font-size:15px; color:#555;">Captures images at the zoo, stores locally</span></span>
+        </div>
+        <div class="pipeline-arrow">↓</div>
+        <div class="pipeline-step">
+          <span class="icon">&#x1F4E1;</span>
+          <span><strong>Cellular upload (GSM modem)</strong><br>
+          <span style="font-size:15px; color:#555;">Sends images over the mobile network — no cables needed</span></span>
+        </div>
+        <div class="pipeline-arrow">↓</div>
+        <div class="pipeline-step">
+          <span class="icon">&#x1F5A5;&#xFE0F;</span>
+          <span><strong>Server (our lab)</strong><br>
+          <span style="font-size:15px; color:#555;">Receives, analyses, annotates, trains models</span></span>
+        </div>
+        <div class="pipeline-arrow">↓</div>
+        <div class="pipeline-step">
+          <span class="icon">&#x1F916;</span>
+          <span><strong>AI model deployed back to server</strong><br>
+          <span style="font-size:15px; color:#555;">Continuously improves as more data arrives</span></span>
+        </div>
+      </div>
+    </div>
+    <div class="col" style="flex:0.9;">
+      <div class="callout" style="margin-top:0;">
+        <strong>Key point:</strong> The field device needs only a power source and mobile signal.
+        No internet cable, no on-site IT infrastructure.
+      </div>
+      <br>
+      <p style="font-size:16px; color:#444;">
+        The two software components are:
+      </p>
+      <ul style="margin-top:8px;">
+        <li><strong>Rodent-client</strong> — runs on the Raspberry Pi at the zoo</li>
+        <li><strong>Server</strong> — runs on our lab machine with a GPU</li>
+      </ul>
+    </div>
+  </div>
+  <span class="slide-num">5 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 5 — FIELD DEVICE
+= -->
+<section class="slide slide-device" id="s5">
+  <h2>The Field Device — Hardware</h2>
+  <div class="cols">
+    <div class="col">
+      <table>
+        <thead><tr><th>Component</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Raspberry Pi 4B</strong></td><td>Small computer that runs all software</td></tr>
+          <tr><td><strong>Infrared (NIR) camera</strong></td><td>Captures detail and texture in low-light alongside the thermal camera</td></tr>
+          <tr><td><strong>Thermal camera</strong></td><td>Detects heat signatures — works in complete darkness, unaffected by shadows</td></tr>
+          <tr><td><strong>GSM/Cellular HAT</strong></td><td>Sends images from both cameras over the mobile network</td></tr>
+          <tr><td><strong>SIM card</strong></td><td>2G data — works wherever there is signal</td></tr>
+        </tbody>
+      </table>
+      <br>
+      <p><strong>Two recording modes:</strong></p>
+      <ul>
+        <li><strong>Motion-triggered</strong> — activates only when movement is detected (saves data costs)</li>
+        <li><strong>Fixed interval</strong> — takes a photo every N seconds around the clock</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout" style="margin-top:20px;">
+    <strong>Both cameras capture the same scene simultaneously.</strong> Every motion event
+    produces a matched infrared/thermal image pair — giving the AI two complementary views
+    of the same moment. The device starts automatically on power-up and restarts itself if anything fails.
+  </div>
+  <span class="slide-num">6 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 6 — REMOTE MANAGEMENT
+= -->
+<section class="slide slide-remote" id="s6">
+  <h2>Managing the Device</h2>
+  <p>Two ways to control the camera — no physical intervention needed for day-to-day adjustments:</p>
+  <div class="cols" style="margin-top:10px;">
+    <div class="col">
+      <div class="pipeline-step" style="margin-bottom:16px; background:#f0f7f0;">
+        <span class="icon">&#x1F4AC;</span>
+        <span><strong>SMS — remote control from anywhere</strong><br>
+        <span style="font-size:15px; color:#555;">Text the SIM card number to reconfigure the camera in real time. No internet needed.<br>
+        e.g. <code>SET motion_threshold=0.03</code> → more sensitive<br>
+        e.g. <code>STATUS</code> → device replies with current settings</span></span>
+      </div>
+      <div class="pipeline-step" style="margin-bottom:16px; background:#f0f7f0;">
+        <span class="icon">&#x1F4F6;</span>
+        <span><strong>WiFi — local access on-site</strong><br>
+        <span style="font-size:15px; color:#555;">When physically at the location, connect directly over WiFi to inspect logs,
+        adjust config files, or update software — no cellular needed</span></span>
+      </div>
+      <div class="pipeline-step" style="background:#f0f7f0;">
+        <span class="icon">&#x1F5DC;&#xFE0F;</span>
+        <span><strong>Automatic image compression</strong><br>
+        <span style="font-size:15px; color:#555;">Images are compressed before upload to stay within mobile data limits (~300 KB per image)</span></span>
+      </div>
+    </div>
+    <div class="col">
+      <p style="font-size:16px; color:#444; margin-bottom:12px;"><strong>Supported SMS commands:</strong></p>
+      <table style="font-size:15px;">
+        <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>STATUS</code></td><td>Device replies with current mode &amp; settings</td></tr>
+          <tr><td><code>SET mode=image_interval</code></td><td>Switch to fixed-interval capture</td></tr>
+          <tr><td><code>SET motion_threshold=0.03</code></td><td>Increase motion sensitivity</td></tr>
+          <tr><td><code>SET motion_cooldown=120</code></td><td>Wait 2 min between captures</td></tr>
+          <tr><td><code>SET image_quality=60</code></td><td>Reduce image size for upload</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <span class="slide-num">7 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 7 — SERVER PIPELINE
+= -->
+<section class="slide slide-pipeline" id="s7">
+  <h2>What Happens After an Image Arrives</h2>
+  <div style="display:flex; gap:30px; align-items:flex-start; margin-top:10px;">
+    <div style="flex:1;">
+      <div class="pipeline">
+        <div class="pipeline-step">
+          <span class="icon">&#x1F4E5;</span>
+          <span><strong>Image received &amp; stored</strong></span>
+        </div>
+        <div class="pipeline-arrow">↓</div>
+        <div class="pipeline-step">
+          <span class="icon">&#x1F916;</span>
+          <span><strong>AI runs automatically</strong> — detects objects, draws bounding boxes</span>
+        </div>
+        <div class="pipeline-arrow">↓</div>
+        <div class="pipeline-step">
+          <span class="icon">&#x1F441;&#xFE0F;</span>
+          <span><strong>Human reviews &amp; corrects labels</strong> — using our annotation tool</span>
+        </div>
+        <div class="pipeline-arrow">↓</div>
+        <div class="pipeline-step">
+          <span class="icon">&#x1F4E6;</span>
+          <span><strong>Labelled images packaged as a training dataset</strong></span>
+        </div>
+        <div class="pipeline-arrow">↓</div>
+        <div class="pipeline-step">
+          <span class="icon">&#x1F3CB;&#xFE0F;</span>
+          <span><strong>New AI model trained</strong> — only deployed if it meets quality threshold</span>
+        </div>
+      </div>
+    </div>
+    <div style="flex:0.8;">
+      <div class="callout" style="margin-top:0;">
+        This loop runs continuously. Every new image from the zoo makes the model a little smarter.
+      </div>
+      <br>
+      <p style="font-size:16px; color:#444;">
+        <strong>Quality gate:</strong> A newly trained model is only deployed if it achieves a
+        minimum detection accuracy score (mAP ≥ 0.3). Otherwise the existing model stays live.
+        Previous models are always archived — we can roll back at any time.
+      </p>
+    </div>
+  </div>
+  <span class="slide-num">8 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 8 — AI MODEL
+= -->
+<section class="slide slide-model" id="s8">
+  <h2>The AI Detection Model</h2>
+  <div class="cols">
+    <div class="col">
+      <p>We use <strong>YOLOv8</strong> — a widely used object detection model in research and industry.</p>
+      <p><strong>What it does:</strong></p>
+      <ul>
+        <li>Analyses each image and draws bounding boxes around detected objects</li>
+        <li>Assigns a class label: <span class="badge">rat</span></li>
+        <li>Reports a confidence score for every detection</li>
+      </ul>
+      <br>
+      <p><strong>The experiment:</strong></p>
+      <ol style="padding-left:22px;">
+        <li>Train and evaluate the model on infrared images alone</li>
+        <li>Train and evaluate on thermal images alone</li>
+        <li>Fuse both modalities — does combining them outperform either alone?</li>
+        <li>Identify which conditions (night, day, occlusion) each modality handles best</li>
+      </ol>
+    </div>
+    <div class="col">
+      <img src="../processed/image_20260423T172609Z/image_20260423T172609Z.jpg"
+           style="width:100%; border-radius:8px; border:1px solid #ddd; display:block; margin-top:8px;"
+           alt="YOLOv8 detection output — rat with bounding box">
+      <p style="font-size:13px; color:#666; margin-top:6px; text-align:center;">
+        23 Apr 2026 · rat detected · confidence 85.2%
+      </p>
+    </div>
+  </div>
+  <span class="slide-num">9 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 9 — ANNOTATION TOOL
+= -->
+<section class="slide slide-annotation" id="s9">
+  <h2>Annotation Tool — How We Label Images</h2>
+  <div class="cols">
+    <div class="col">
+      <p>A browser-based tool — no installation required:</p>
+      <ul style="margin-top:8px;">
+        <li>Opens any uploaded image in the browser</li>
+        <li>Researcher draws rectangles around rodents — or marks human presence to help the model learn the distinction</li>
+        <li>Assigns a label: <span class="badge">rat</span> or <span class="badge" style="background:#555;">human</span></li>
+        <li>Click Submit — label is saved instantly</li>
+        <li>If no target is visible, submit an empty image (useful as a negative example)</li>
+      </ul>
+      <br>
+      <div class="callout">
+        This is how raw camera images become training data that makes the AI smarter with every batch.
+      </div>
+    </div>
+    <div class="col">
+      <!-- Live annotation tool mockup -->
+      <div style="font-family:sans-serif; background:#1a1a1a; border-radius:8px; overflow:hidden; border:1px solid #444; display:flex; flex-direction:column; height:300px; margin-top:8px;">
+        <div style="display:flex; align-items:center; gap:12px; padding:7px 12px; background:#2a2a2a; border-bottom:1px solid #444; flex-shrink:0;">
+          <span style="font-size:13px; font-weight:600; color:#fff;">Annotate</span>
+          <span style="font-size:11px; color:#aaa; flex:1;">image_20260424T152127Z.jpg</span>
+          <span style="font-size:11px; color:#aaa; margin-right:8px;">175 annotated · 11,732 pending</span>
+        </div>
+        <div style="display:flex; flex:1; overflow:hidden;">
+          <div style="flex:1; background:#111; display:flex; align-items:center; justify-content:center; overflow:hidden; position:relative;">
+            <canvas id="annotMockCanvas" style="display:block; cursor:crosshair;"></canvas>
+          </div>
+          <div style="width:160px; background:#2a2a2a; border-left:1px solid #444; padding:10px; display:flex; flex-direction:column; gap:10px; flex-shrink:0;">
+            <div>
+              <div style="font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:#888; margin-bottom:6px;">Class</div>
+              <button style="width:100%; padding:7px 10px; border:2px solid #ff9800; border-radius:5px; background:#1a1a1a; color:#ff9800; font-size:13px; font-weight:500; text-align:left; margin-bottom:5px; cursor:default;">rat</button>
+              <button style="width:100%; padding:7px 10px; border:2px solid transparent; border-radius:5px; background:#333; color:#2196f3; font-size:13px; font-weight:500; text-align:left; cursor:default;">human</button>
+            </div>
+            <div style="font-size:11px; color:#666; line-height:1.6;">Draw: click &amp; drag<br>Select: click box<br>Delete: Delete key</div>
+            <div style="margin-top:auto; display:flex; flex-direction:column; gap:6px;">
+              <button style="padding:8px; border:none; border-radius:5px; background:#444; color:#ccc; font-size:13px; cursor:default;">No Detection</button>
+              <button style="padding:8px; border:none; border-radius:5px; background:#2e7d32; color:#fff; font-size:13px; cursor:default;">Submit</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <span class="slide-num">10 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 10 — RESULTS
+= -->
+<section class="slide slide-results" id="s10">
+  <h2>Results So Far</h2>
+  <div class="stat-grid">
+    <div class="stat-box">
+      <div class="number">11,907</div>
+      <div class="label">Total images uploaded from the field</div>
+    </div>
+    <div class="stat-box">
+      <div class="number">175</div>
+      <div class="label">Images reviewed &amp; annotated</div>
+    </div>
+    <div class="stat-box">
+      <div class="number">1</div>
+      <div class="label">Training runs completed</div>
+    </div>
+    <div class="stat-box">
+      <div class="number">~87%</div>
+      <div class="label">Top detection confidence (rat)</div>
+    </div>
+  </div>
+  <div class="callout" style="margin-top:28px;">
+    All data comes from our <strong>deployed camera inside the enclosure</strong> (device: rodent2),
+    collected over approximately 3.5 weeks (20 April = 13 May 2026) via automatic cellular upload.
+    All detections to date are <strong>rats</strong>. No human detections have been recorded,
+    consistent with the limited keeper access inside the enclosure — and in line with our
+    approach of not retaining images of people.
+  </div>
+  <span class="slide-num">11 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 11 — EXAMPLE DETECTIONS
+= -->
+<section class="slide slide-detections" id="s11">
+  <h2>Example Detections</h2>
+  <!-- Example 1 -->
+  <p style="font-size:15px; color:#666; margin-bottom:6px;">Example 1 &nbsp;·&nbsp; 23 April 2026, 14:22 UTC &nbsp;·&nbsp; confidence 87.5%</p>
+  <div class="cols" style="gap:16px;">
+    <div class="col">
+      <p style="font-size:13px; color:#888; margin-bottom:4px; text-align:center;">Original image</p>
+      <img src="../uploads/image_20260423T142204Z.jpg"
+           style="width:100%; border-radius:6px; border:1px solid #ddd; display:block;"
+           alt="Original camera image 23 April 2026">
+    </div>
+    <div class="col">
+      <p style="font-size:13px; color:#888; margin-bottom:4px; text-align:center;">AI detection output</p>
+      <img src="../processed/image_20260423T142204Z/image_20260423T142204Z.jpg"
+           style="width:100%; border-radius:6px; border:1px solid #ddd; display:block;"
+           alt="AI detection output with bounding boxes">
+    </div>
+  </div>
+  <!-- Example 2 -->
+  <p style="font-size:15px; color:#666; margin-top:18px; margin-bottom:6px;">Example 2 &nbsp;·&nbsp; 28 April 2026, 15:46 UTC &nbsp;·&nbsp; confidence 86.9%</p>
+  <div class="cols" style="gap:16px;">
+    <div class="col">
+      <img src="../uploads/image_20260428T154604Z.jpg"
+           style="width:100%; border-radius:6px; border:1px solid #ddd; display:block;"
+           alt="Original camera image 28 April 2026">
+    </div>
+    <div class="col">
+      <img src="../processed/image_20260428T154604Z/image_20260428T154604Z.jpg"
+           style="width:100%; border-radius:6px; border:1px solid #ddd; display:block;"
+           alt="AI detection output with bounding boxes">
+    </div>
+  </div>
+  <ul style="margin-top:14px;">
+    <li>All detections to date are <strong>rats (class 0)</strong> — the system is correctly distinguishing them from background clutter</li>
+    <li>Motion-triggered capture means images are collected only when something moves — reducing data volume while catching activity</li>
+  </ul>
+  <span class="slide-num">12 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 12 — LIVE TODAY
+= -->
+<section class="slide slide-live" id="s12">
+  <h2>What Is Live and Working Today</h2>
+  <p>Everything below is <strong>built and operational:</strong></p>
+  <div class="cols" style="margin-top:10px;">
+    <div class="col">
+      <ul class="checklist">
+        <li>Camera captures images in motion or interval mode</li>
+        <li>Images upload automatically over cellular data</li>
+        <li>Server receives and stores all images with metadata</li>
+        <li>AI inference runs automatically on every new image</li>
+      </ul>
+    </div>
+    <div class="col">
+      <ul class="checklist">
+        <li>Browser-based annotation tool — accessible from any device</li>
+        <li>Model retraining with one click</li>
+        <li>Quality gate before any new model goes live</li>
+        <li>Previous models archived — rollback always possible</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout" style="margin-top:24px;">
+    The complete end-to-end pipeline is operational and has been running in the field since April 2026.
+    This meeting is about expanding coverage — new angles within the enclosure and new sites
+    outside it.
+  </div>
+  <span class="slide-num">13 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 13 — WHAT WE NEED
+= -->
+<section class="slide slide-needs" id="s13">
+  <h2>What Would Help Us Most</h2>
+  <p>We would love your input on two things that would meaningfully broaden what the system can learn:</p>
+
+  <div class="pipeline-step" style="margin:16px 0 8px; background:#f0f7f0;">
+    <span class="icon">&#x1F4D0;</span>
+    <div>
+      <strong>1. Different camera angles within the enclosure</strong><br>
+      <span style="font-size:16px; color:#444;">
+        All our data so far comes from a single fixed viewpoint. Additional angles —
+        overhead, ground-level, side-on — would help the model generalise beyond
+        what it has seen, making detections more reliable in varied conditions.
+      </span>
+    </div>
+  </div>
+
+  <div class="pipeline-step" style="margin:8px 0; background:#f0f7f0;">
+    <span class="icon">&#x1F5FA;&#xFE0F;</span>
+    <div>
+      <strong>2. Known rodent hotspots outside the enclosures</strong><br>
+      <span style="font-size:16px; color:#444;">
+        Rodents tend to use areas like burrow sites, feed stores, service corridors,
+        and sheltered perimeter zones. If your team knows of any such spots around
+        the zoo, those would be ideal places to extend the monitoring — and would give
+        us a much richer picture of rodent behaviour beyond the enclosure itself.
+      </span>
+    </div>
+  </div>
+  <span class="slide-num">14 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 14 — PLACEMENT PLAN
+= -->
+<section class="slide slide-placement" id="s14">
+  <h2>Ideas for Expanding Coverage</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Location type</th>
+        <th>Why it could be useful</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Existing enclosure — different angle</strong><br><span style="font-size:13px; color:#666;">e.g. overhead or ground-level</span></td>
+        <td>Same familiar environment — a quick way to broaden the dataset and explore how camera angle affects detection</td>
+      </tr>
+      <tr>
+        <td><strong>Known rodent hotspots</strong><br><span style="font-size:13px; color:#666;">burrow sites, sheltered spots — outside enclosures</span></td>
+        <td>Areas where rodents are already known to be active would give us ecologically meaningful data beyond the enclosure setting</td>
+      </tr>
+      <tr>
+        <td><strong>Feed storage or prep area</strong><br><span style="font-size:13px; color:#666;">outside enclosures</span></td>
+        <td>Likely to see rodent activity alongside regular keeper presence — useful for capturing both detection classes in a natural context</td>
+      </tr>
+      <tr>
+        <td><strong>Service corridor or utility space</strong><br><span style="font-size:13px; color:#666;">outside enclosures</span></td>
+        <td>Rodents tend to move along walls and through connecting passages — could reveal patterns not visible inside enclosures</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="callout" style="margin-top:20px;">
+    <strong>For discussion:</strong> Which of these areas are accessible? Are there power points
+    nearby, or would battery power be needed? Any visitor or safety zones to avoid?
+  </div>
+  <span class="slide-num">15 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 15 — NEXT STEPS
+= -->
+<section class="slide slide-next" id="s15">
+  <h2>Next Steps</h2>
+  <table>
+    <thead>
+      <tr><th>Step</th><th>Who</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Install cameras at agreed sites</td>
+        <td>Hammad</td>
+      </tr>
+      <tr>
+        <td>Collect images from new angles (automated)</td>
+        <td>System (automated)</td>
+      </tr>
+      <tr>
+        <td>Annotate new images and retrain model</td>
+        <td>Our team</td>
+      </tr>
+      <tr>
+        <td>Share updated detection results with zoo team</td>
+        <td>Our team</td>
+      </tr>
+      <tr>
+        <td>Joint review and iteration</td>
+        <td>Both teams</td>
+      </tr>
+    </tbody>
+  </table>
+  <span class="slide-num">16 / 17</span>
+</section>
+
+<!-- =
+     SLIDE 16 — SUMMARY
+= -->
+<section class="slide slide-summary" id="s16">
+  <div style="max-width:800px;">
+    <h2>Summary</h2>
+    <ul class="checklist" style="margin-top:10px;">
+      <li>We have built a <strong>complete, working multimodal pipeline</strong> — paired infrared and thermal cameras feeding a shared AI detection system</li>
+      <li>The device is <strong>already deployed and running</strong> inside the enclosure — 11,907 images collected to date</li>
+      <li>The AI detects <strong>rodents</strong> and will improve automatically as more labelled data arrives — images of people are not retained</li>
+      <li>We need your help expanding to <strong>different angles and sites outside the enclosures</strong> to build a complete picture</li>
+      <li>This collaboration directly improves detection quality and long-term usefulness of the system</li>
+    </ul>
+  </div>
+  <span class="slide-num">17 / 17</span>
+</section>
+
+
+<script>
+  // -- Annotation tool mockup canvas --
+  // image_20260424T152127Z: class=rat, cx=0.367409, cy=0.680476, w=0.0744427, h=0.0659385
+  (function() {
+    const canvas = document.getElementById('annotMockCanvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.src = '../uploads/image_20260424T152127Z.jpg';
+    img.onload = function() {
+      const wrap = canvas.parentElement;
+      const maxW = wrap.clientWidth  - 16;
+      const maxH = wrap.clientHeight - 16;
+      const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight, 1);
+      canvas.width  = Math.round(img.naturalWidth  * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      // YOLO normalised box → pixel coords
+      const cx = 0.367409, cy = 0.680476, bw = 0.0744427, bh = 0.0659385;
+      const x = (cx - bw / 2) * canvas.width;
+      const y = (cy - bh / 2) * canvas.height;
+      const w = bw * canvas.width;
+      const h = bh * canvas.height;
+
+      // Box fill
+      ctx.fillStyle = 'rgba(255,152,0,0.15)';
+      ctx.fillRect(x, y, w, h);
+      // Box stroke
+      ctx.strokeStyle = '#ff9800';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, w, h);
+      // Label
+      ctx.fillStyle = '#ff9800';
+      ctx.font = 'bold 12px sans-serif';
+      ctx.fillText('rat', x + 3, y + 13);
+    };
+  })();
+
+  // Highlight active nav dot based on scroll position
+  const slides = document.querySelectorAll('.slide');
+  const dots = document.querySelectorAll('#nav a');
+
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const idx = Array.from(slides).indexOf(entry.target);
+        dots.forEach(d => d.classList.remove('active'));
+        if (dots[idx]) dots[idx].classList.add('active');
+      }
+    });
+  }, { threshold: 0.5 });
+
+  slides.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>
