@@ -1,0 +1,13 @@
+services:
+  server:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./uploads:/app/uploads
+      - ./processed:/app/processed
+      - ./annotated:/app/annotated
+      - ./failed:/app/failed
+      - ./dataset:/app/dataset
+    restart: unless-stopped
