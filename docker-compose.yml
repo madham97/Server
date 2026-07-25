@@ -6,8 +6,12 @@ services:
     volumes:
       - ./models:/app/models
       - ./uploads:/app/uploads
+      - ./thermal:/app/thermal
       - ./processed:/app/processed
       - ./annotated:/app/annotated
       - ./failed:/app/failed
       - ./dataset:/app/dataset
+      - ./upload_log.txt:/app/upload_log.txt
+      - ./processed_log.txt:/app/processed_log.txt
+      - ./annotation_log.txt:/app/annotation_log.txt
     restart: unless-stopped
