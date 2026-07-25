@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,15 @@ from config import UPLOAD_DIR, UPLOAD_LOG
 
 router = APIRouter()
 
+# Thermal-fused frames from the Pi arrive as RGBA WebP: the visible image in RGB, the
+# normalized thermal map in the alpha channel. JPEG can't hold alpha, so we split them —
+# the RGB is saved to UPLOAD_DIR as a normal JPEG (the detection pipeline handles it
+# unchanged), and the thermal channel is kept here alongside a JSON sidecar with the actual
+# temperature range (needed to reconstruct °C from the 0-255 alpha). This lives in a
+# subdirectory because the uploads watcher only scans UPLOAD_DIR's top level, so thermal
+# files are never fed to YOLO.
+THERMAL_DIR = UPLOAD_DIR / "thermal"
+
 
 @router.post("/upload")
 async def upload(
@@ -18,18 +28,45 @@ async def upload(
     mode: str = Form(""),
     motion_score: str = Form(""),
     timestamp: str = Form(""),
+    format: str = Form(""),
+    thermal_min_c: str = Form(""),
+    thermal_max_c: str = Form(""),
+    thermal_avg_c: str = Form(""),
 ):
     if image is None:
         raise HTTPException(status_code=422, detail="No file provided")
 
     data = await image.read()
+    thermal_file = None
 
     if image.filename.lower().endswith('.webp'):
         img = PILImage.open(io.BytesIO(data))
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=95)
-        data = buf.getvalue()
-        filename = Path(image.filename).stem + '.jpg'
+        stem = Path(image.filename).stem
+
+        if 'A' in img.getbands():
+            # Thermal-fused frame: separate the visible RGB from the thermal alpha channel.
+            rgba = img.convert('RGBA')
+            buf = io.BytesIO()
+            rgba.convert('RGB').save(buf, format='JPEG', quality=95)
+            data = buf.getvalue()
+            filename = stem + '.jpg'
+
+            THERMAL_DIR.mkdir(exist_ok=True)
+            thermal_file = stem + '_thermal.png'
+            rgba.getchannel('A').save(THERMAL_DIR / thermal_file, format='PNG')
+            (THERMAL_DIR / (stem + '_thermal.json')).write_text(json.dumps({
+                'source_image':  filename,
+                'device_id':     device_id,
+                'timestamp':     timestamp,
+                'thermal_min_c': thermal_min_c,
+                'thermal_max_c': thermal_max_c,
+                'thermal_avg_c': thermal_avg_c,
+            }))
+        else:
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG', quality=95)
+            data = buf.getvalue()
+            filename = stem + '.jpg'
     else:
         filename = image.filename
 
@@ -40,8 +77,10 @@ async def upload(
         mode,
         f"motion={motion_score}" if motion_score else None,
         timestamp,
+        f"thermal[{thermal_min_c}..{thermal_max_c}C]" if thermal_min_c else None,
     ] if p]
     logging.info(f"Received upload: {filename}" +
+                 (f" (+thermal {thermal_file})" if thermal_file else "") +
                  (f" [{', '.join(meta_parts)}]" if meta_parts else ""))
 
     received_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
