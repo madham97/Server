@@ -7,18 +7,17 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from PIL import Image as PILImage
 
-from config import UPLOAD_DIR, UPLOAD_LOG
+from config import THERMAL_DIR, UPLOAD_DIR, UPLOAD_LOG
 
 router = APIRouter()
 
 # Thermal-fused frames from the Pi arrive as RGBA WebP: the visible image in RGB, the
 # normalized thermal map in the alpha channel. JPEG can't hold alpha, so we split them —
 # the RGB is saved to UPLOAD_DIR as a normal JPEG (the detection pipeline handles it
-# unchanged), and the thermal channel is kept here alongside a JSON sidecar with the actual
-# temperature range (needed to reconstruct °C from the 0-255 alpha). This lives in a
-# subdirectory because the uploads watcher only scans UPLOAD_DIR's top level, so thermal
-# files are never fed to YOLO.
-THERMAL_DIR = UPLOAD_DIR / "thermal"
+# unchanged), and the thermal channel is kept in THERMAL_DIR alongside a JSON sidecar with
+# the actual temperature range (needed to reconstruct °C from the 0-255 alpha). THERMAL_DIR
+# is a sibling of UPLOAD_DIR, not a subdirectory, so thermal files are never in scope for
+# the uploads watcher regardless of how it filters.
 
 
 @router.post("/upload")

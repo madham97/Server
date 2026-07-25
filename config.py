@@ -7,6 +7,7 @@ UPLOAD_DIR = _BASE / "uploads"
 PROCESSED_DIR = _BASE / "processed"
 ANNOTATED_DIR = _BASE / "annotated"
 FAILED_DIR = _BASE / "failed"
+THERMAL_DIR = _BASE / "thermal"
 
 # Processing configuration
 POLL_INTERVAL = 5

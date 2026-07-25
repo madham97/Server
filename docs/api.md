@@ -55,11 +55,15 @@ Receive an image from a field device.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `image` | file | yes | JPEG, PNG, or WebP. WebP is converted to JPEG on receipt. |
+| `image` | file | yes | JPEG, PNG, or WebP. WebP is converted to JPEG on receipt. Thermal-fused RGBA WebP is split — see Notes. |
 | `device_id` | text | no | Identifier of the sending device |
 | `mode` | text | no | `image_motion` or `image_interval` |
 | `motion_score` | text | no | Motion ratio that triggered capture (float as string) |
 | `timestamp` | text | no | ISO 8601 capture time |
+| `format` | text | no | Format hint sent by the Pi (currently informational only, not read by the server) |
+| `thermal_min_c` | text | no | Minimum temperature (°C) in the thermal frame, if `image` is a thermal-fused RGBA WebP |
+| `thermal_max_c` | text | no | Maximum temperature (°C) in the thermal frame, if `image` is a thermal-fused RGBA WebP |
+| `thermal_avg_c` | text | no | Average temperature (°C) in the thermal frame, if `image` is a thermal-fused RGBA WebP |
 
 **Response**
 ```json
@@ -69,6 +73,15 @@ Receive an image from a field device.
 **Side effects:**
 - Saves image to `uploads/<filename>`.
 - Appends a row to `upload_log.txt`.
+- If the uploaded WebP has an alpha channel (thermal-fused frame): saves the alpha channel to
+  `thermal/<stem>_thermal.png` and writes `thermal/<stem>_thermal.json` with `source_image`,
+  `device_id`, `timestamp`, and the `thermal_min_c`/`max_c`/`avg_c` values.
+
+**Notes:**
+- Thermal-fused frames arrive as RGBA WebP: visible image in RGB, normalized thermal map in
+  alpha. JPEG can't hold alpha, so the RGB and thermal channel are split and saved separately.
+  `thermal/` is a sibling of `uploads/`, not a subdirectory, so the background watcher (which
+  only reads `uploads/`) never sees thermal files.
 
 ---
 

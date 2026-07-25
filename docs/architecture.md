@@ -37,6 +37,10 @@ classes.json        Class list ["rat", "human"]
 Pi device
   └─ POST /upload (multipart/form-data)
        ├─ WebP converted to JPEG on receipt
+       ├─ If RGBA (thermal-fused frame): split into RGB + alpha
+       │    ├─ RGB → JPEG, saved to uploads/<filename> (unchanged path below)
+       │    └─ Alpha → thermal/<stem>_thermal.png + thermal/<stem>_thermal.json
+       │         (thermal/ is a sibling of uploads/, never scanned by the watcher)
        ├─ Saved to uploads/<filename>
        └─ Logged to upload_log.txt
 ```
@@ -109,6 +113,7 @@ Persistence is file-based (append-only log files), not a database. This was an i
 
 ```
 uploads/        All received images (never deleted automatically)
+thermal/        Thermal PNG + JSON sidecar split from RGBA uploads, keyed by source stem
 processed/      YOLO output per image — processed/<stem>/{<stem>.jpg, labels/<stem>.txt}
 annotated/      Human labels — annotated/<stem>/labels/<stem>.txt
 failed/         Images that exceeded MAX_PROCESS_ATTEMPTS

@@ -60,6 +60,16 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 ---
 
+### Thermal channel split into a sibling `thermal/` directory
+
+**Decision:** Thermal-fused frames from the Pi arrive as RGBA WebP (visible image in RGB, normalized thermal map in alpha). JPEG can't hold alpha, so on upload the RGB is saved as a normal JPEG to `uploads/` (unchanged for the detection pipeline) and the alpha channel is saved to `thermal/<stem>_thermal.png` with a `thermal/<stem>_thermal.json` sidecar carrying `thermal_min_c`/`max_c`/`avg_c` needed to reconstruct real degrees from the 0-255 alpha values. `thermal/` is a top-level directory, a sibling of `uploads/` — not a subdirectory of it.
+
+**Why it worked:** Before this, any RGBA upload raised `cannot write mode RGBA as JPEG` and returned HTTP 500, silently dropping the thermal data (plain RGB uploads were unaffected). Splitting preserves both channels without changing what the detection pipeline receives. Making `thermal/` a sibling of `uploads/`, following the same pattern as `processed/`, `annotated/`, and `failed/`, keeps its exclusion from `watch_uploads()` structural — the watcher only ever reads `uploads/` — rather than relying on the watcher's file-type filter to incidentally skip a subdirectory.
+
+**Trade-off:** Nothing in the pipeline consumes `thermal/` yet; this change only stops the crash and data loss. A downstream consumer (annotation, detection fusion, or a UI) would need to be built separately if the thermal data is meant to be used, not just retained.
+
+---
+
 ### Model promotion gate (mAP50 ≥ 0.3)
 
 **Decision:** `POST /train/promote` requires `mAP50 >= MIN_MAP` before overwriting `best.pt`.

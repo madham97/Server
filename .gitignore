@@ -1,6 +1,7 @@
 uploads/
 processed/
 failed/
+thermal/
 dataset/
 annotated/
 runs/

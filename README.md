@@ -35,7 +35,7 @@ Requires Docker. Model weights (`models/best.pt`) must be copied to the server m
 # On the server — first time setup
 git clone -b <branch> https://github.com/madham97/Server.git ~/Server
 cd ~/Server
-mkdir -p models uploads processed annotated failed dataset
+mkdir -p models uploads processed annotated failed dataset thermal
 
 # Copy model weights from local machine
 scp /path/to/models/best.pt user@<server-ip>:~/Server/models/
@@ -95,11 +95,20 @@ The `/upload` endpoint accepts `multipart/form-data` with:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `image` | file | JPEG or PNG (WebP accepted and converted) |
+| `image` | file | JPEG or PNG (WebP accepted and converted). Thermal-fused RGBA WebP is split into JPEG + thermal sidecar (see below). |
 | `device_id` | text | Identifier of the sending device |
 | `mode` | text | Recording mode (`image_motion`, `image_interval`) |
 | `motion_score` | text | Motion ratio that triggered capture |
 | `timestamp` | text | ISO 8601 capture time |
+| `format` | text | Format hint sent by the Pi (currently informational only) |
+| `thermal_min_c` | text | Minimum temperature (°C) in the thermal frame, if present |
+| `thermal_max_c` | text | Maximum temperature (°C) in the thermal frame, if present |
+| `thermal_avg_c` | text | Average temperature (°C) in the thermal frame, if present |
+
+Thermal-fused frames (RGBA WebP — visible image in RGB, normalized thermal map in alpha) are
+split on receipt: the RGB is saved as a normal JPEG to `uploads/`, and the alpha channel is
+saved as `thermal/<stem>_thermal.png` with a `thermal/<stem>_thermal.json` sidecar carrying
+`thermal_min_c`/`max_c`/`avg_c` (needed to reconstruct real degrees from the 0-255 alpha).
 
 ### Annotation
 
@@ -167,6 +176,7 @@ models/
   runs/                 — Training run outputs (gitignored)
   archive/              — Superseded model versions (gitignored)
 uploads/                — All received images (gitignored)
+thermal/                — Thermal PNG + JSON sidecar split from RGBA uploads (gitignored)
 processed/              — YOLO inference outputs (gitignored)
 annotated/              — Human-confirmed label files (gitignored)
 dataset/                — Exported training dataset (gitignored)
