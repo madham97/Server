@@ -18,7 +18,7 @@ from config import (
     MODEL_IOU,
 )
 import state
-from routers import upload, annotate, export, train, infer
+from routers import upload, annotate, export, train, infer, config_help
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
@@ -42,6 +42,7 @@ app.include_router(annotate.router)
 app.include_router(export.router)
 app.include_router(train.router)
 app.include_router(infer.router)
+app.include_router(config_help.router)
 
 
 @app.get("/health")
