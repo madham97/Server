@@ -70,6 +70,44 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 ---
 
+### `/thermal` viewer for browsing RGB/thermal pairs
+
+**Decision:** Added `GET /thermal` (`routers/thermal_view.py`), a read-only HTML page listing every thermal sidecar newest-first, each paired with its source JPEG side by side (device id, timestamp, min/max/avg °C underneath). Serves the thermal PNG via `GET /thermal/image/{name}`; the RGB side reuses the existing `GET /annotate/image/{image_name}`.
+
+**Why it worked:** The obvious way to make pairs "easy to see" would be to co-locate the RGB and thermal files in the same folder or a per-capture subdirectory. Both were rejected: same-folder risks the watcher picking up thermal PNGs again (see the sibling-directory decision above), and a per-capture subdirectory would require rewriting every place that currently builds a path as `UPLOAD_DIR / filename` (`annotate.py`, `export.py`, the watcher, `/infer/test`). A read-only viewer gets the same practical outcome — visual pairing — without touching storage layout or any pipeline code.
+
+**Trade-off:** It's a manual pairing view (`stem` matched at request time via the sidecar's `source_image` field), not a stored/indexed relationship. If a JPEG has been deleted (e.g. during disk cleanup) the viewer shows a "rgb missing" placeholder rather than erroring.
+
+---
+
+### SMS config-helper rebuilt for the current `SET key=value` protocol
+
+**Decision:** Added `GET /config-help` (`routers/config_help.py`), an interactive page for building SMS config commands to text to the Pi's SIM number.
+
+**Why it worked:** A `/config-help` page already existed on `main` before the images-only refactor, but it built JSON-patch SMS bodies (`{"recording":{"mode":"VALUE"}}`) matching an older client protocol. The current Pi client (`docs/stakeholder-project-guide.md`) uses a plain-text `SET key=value key=value ...` protocol with a different, smaller set of keys (`mode`, `motion_threshold`, `motion_cooldown`, `detection_interval`, `image_interval`, `image_quality`, `webp_compress`, `webp_quality`). Porting the old page as-is would have generated SMS commands the current client can't parse, so it was rebuilt from scratch against the documented current protocol instead of merged in.
+
+---
+
+### `thermal/` and the log files bind-mounted in `docker-compose.yml`
+
+**Decision:** `docker-compose.yml` now mounts `./thermal:/app/thermal`, `./upload_log.txt:/app/upload_log.txt`, `./processed_log.txt:/app/processed_log.txt`, and `./annotation_log.txt:/app/annotation_log.txt`, alongside the pre-existing `uploads/`, `processed/`, `annotated/`, `failed/`, `dataset/`, `models/` mounts.
+
+**Why it worked:** `THERMAL_DIR` and the three log files live at `config.py`'s `_BASE` (i.e. `/app/` in the container) like everything else, but unlike `uploads/`/`processed/`/etc. they weren't in the compose file's volume list — so they existed only in the container's ephemeral filesystem. A container recreation (rebuild, `docker compose up -d`, host reboot) silently wiped them. This was discovered by inspecting a running container directly (`docker exec ... cat /app/config.py`) and finding it didn't match either the last built image or the current repo — someone had live-patched the container to stop 500s without a real rebuild, and the thermal captures that patch produced were about to be lost on the next recreation.
+
+**Note:** bind-mounting a single file (not a directory) requires the host-side file to already exist before `docker compose up`, or Docker will create a directory in its place and the app's `open(path, 'a')` call will fail. `upload_log.txt`, `processed_log.txt`, `annotation_log.txt` must be `touch`ed on the host once before the first mount.
+
+---
+
+### Dual ngrok tunnels: `--scheme http` for the Pi, default (https) for browsers
+
+**Decision:** Two separate `ngrok` agent processes run simultaneously against the same static reserved domain (`maryrose-rejoiceful-avah.ngrok-free.dev`): one started with `ngrok http --scheme http 8000` (http-only, no redirect), and a second with plain `ngrok http 8000` (https-capable, the default).
+
+**Why it worked:** The Pi's GSM/cellular modem uploader needs plain, unredirected HTTP — `--scheme http` was chosen originally for exactly that reason. But `.dev` is a Google-owned gTLD that is unconditionally HSTS-preloaded in every modern browser: any `*.ngrok-free.dev` URL is force-upgraded to https client-side, permanently, with no way to opt out via site settings, HSTS deletion, or "always use secure connections" toggles (those only affect dynamic/per-site HSTS, not TLD-level preload entries baked into the browser). So an http-only tunnel is invisible to browsers — they get ngrok's `ERR_NGROK_3200` "offline" page over https, not even a real connection failure. Running a second agent in default https mode on the same domain answers browser requests correctly (ngrok can actually terminate TLS) while leaving the Pi's http-only tunnel untouched.
+
+**Trade-off:** Both `ngrok` processes are unmanaged background processes (`nohup ... &`), not a service — they don't survive a host reboot and need to be restarted manually (or wired into `systemd`/`docker compose` if that becomes a recurring pain).
+
+---
+
 ### Model promotion gate (mAP50 ≥ 0.3)
 
 **Decision:** `POST /train/promote` requires `mAP50 >= MIN_MAP` before overwriting `best.pt`.
@@ -155,3 +193,11 @@ All endpoints are unauthenticated. The server is intended to run behind ngrok or
 ### Training on CPU is very slow
 
 YOLOv8n on CPU can take hours per epoch on a laptop. CUDA is strongly recommended. The PyTorch CUDA install requires the nightly index URL (see README setup section) — the stable channel does not always carry the right CUDA build for newer GPUs.
+
+### `uploads/` grows unbounded and can fill the disk
+
+Images accumulate at roughly 440 MB/day (~510 images/day observed over ~70 days) and are never deleted automatically (see "No deduplication on upload" above — same root cause: nothing ever prunes `uploads/`). On a 29GB disk this reached 27GB used / 1.1GB free, which is not enough headroom for `docker compose up -d --build` to complete (`pip install torch` needs roughly 2-3GB of scratch space to download and unpack; it fails with `OSError: [Errno 28] No space left on device` partway through if the disk is much above ~90% full). When this happened, the fix was deleting the most recent 15 days of raw uploads (chosen because they were the ones under discussion at the time, not because "newest" is inherently safer to delete — at the time, `annotated/` and `processed/` were both completely empty, so no uploaded image anywhere in the archive had been annotated or run through YOLO yet; age wasn't a signal of anything).
+
+**Before a rebuild, check `df -h /` first.** If free space is under ~3GB, either prune `uploads/` (there's no built-in retention/archival tooling yet — see below) or `docker builder prune -f` / `docker image prune -f` to reclaim build cache and unreferenced images (safe, doesn't touch running containers or data).
+
+**Future work:** there's no automatic retention policy for `uploads/`. Given the annotation pipeline hasn't consumed any of it yet (as of this writing), consider either a retention window (e.g. delete raw uploads older than N days once they're annotated) or moving cold data off-box before it becomes a recurring disk-space emergency.

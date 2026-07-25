@@ -333,3 +333,30 @@ Run inference on a random sample of images from `uploads/`. Useful for verifying
 **Notes:**
 - This endpoint does NOT update `processed_log.txt` — it's a test endpoint. The same images can be processed again by the background watcher.
 - Results are saved to `processed/` the same way as the background watcher.
+
+---
+
+## Utilities
+
+### `GET /thermal?limit=100`
+Browse RGB/thermal capture pairs side by side, newest first. Read-only, no side effects.
+
+**Query params**
+
+| Param | Default | Description |
+|---|---|---|
+| `limit` | `100` | Maximum number of pairs to show |
+
+**Response:** HTML page. Each thermal sidecar in `thermal/` is matched to its source JPEG (via the sidecar's `source_image` field) and rendered as a card with both images, `device_id`, `timestamp`, and the min/max/avg °C range. If the source JPEG no longer exists in `uploads/` (e.g. deleted for disk space), that side shows a "rgb missing" placeholder instead of a broken image.
+
+---
+
+### `GET /thermal/image/{name}`
+Serve a raw thermal PNG from `thermal/`. Used by the `/thermal` page; `name` is validated to resolve inside `thermal/` before serving.
+
+**Response:** image file (PNG). **404** if the name doesn't resolve inside `thermal/` or the file doesn't exist.
+
+---
+
+### `GET /config-help`
+Interactive page for building `SET key=value key=value ...` SMS commands to text to the Pi's SIM number, per the SMS remote-configuration protocol in `docs/stakeholder-project-guide.md`. No request params; entirely client-side JS, no backend state.
