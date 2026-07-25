@@ -16,6 +16,8 @@ pip install -r requirements.txt
 
 ## Running
 
+### Local (development)
+
 ```bash
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
@@ -24,6 +26,59 @@ Expose publicly (e.g. for a Pi on cellular):
 ```bash
 ngrok http --scheme http 8000
 ```
+
+### Shared server (Docker)
+
+Requires Docker. Model weights (`models/best.pt`) must be copied to the server manually as they are gitignored.
+
+```bash
+# On the server — first time setup
+git clone -b <branch> https://github.com/madham97/Server.git ~/Server
+cd ~/Server
+mkdir -p models uploads processed annotated failed dataset
+
+# Copy model weights from local machine
+scp /path/to/models/best.pt user@<server-ip>:~/Server/models/
+
+# Build and start (runs in background, restarts on reboot)
+docker compose up -d --build
+```
+
+Check the server is up:
+```bash
+curl http://localhost:8000/health
+```
+
+View logs:
+```bash
+docker compose logs --tail=20
+```
+
+Stop cleanly:
+```bash
+docker compose down
+```
+
+#### Exposing publicly via ngrok (no sudo required)
+
+Download ngrok into the repo directory:
+```bash
+curl -O https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+tar -xzf ngrok-v3-stable-linux-amd64.tgz
+./ngrok config add-authtoken <your-token>
+```
+
+Run in background so it survives terminal disconnect:
+```bash
+nohup ./ngrok http --scheme http 8000 > ~/ngrok.log 2>&1 &
+```
+
+Get the assigned public URL:
+```bash
+curl http://localhost:4040/api/tunnels
+```
+
+> **Note:** The free ngrok URL changes every time ngrok restarts.
 
 ## Endpoints
 
