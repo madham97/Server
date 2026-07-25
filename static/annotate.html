@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Annotation Tool</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: sans-serif;
+      background: #1a1a1a;
+      color: #e0e0e0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 10px 16px;
+      background: #2a2a2a;
+      border-bottom: 1px solid #444;
+      flex-shrink: 0;
+    }
+
+    #header h1 { font-size: 16px; font-weight: 600; color: #fff; }
+    #filename { font-size: 13px; color: #aaa; flex: 1; }
+    #stats { font-size: 13px; color: #aaa; }
+
+    #search {
+      display: flex;
+      gap: 6px;
+    }
+
+    #search input {
+      flex: 1;
+      background: #333;
+      border: 1px solid #555;
+      border-radius: 4px;
+      color: #e0e0e0;
+      font-size: 13px;
+      padding: 4px 8px;
+      outline: none;
+    }
+
+    #search input:focus { border-color: #888; }
+
+    #search button {
+      padding: 4px 10px;
+      background: #444;
+      border: 1px solid #555;
+      border-radius: 4px;
+      color: #ccc;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    #search button:hover { background: #555; }
+    #search-error { font-size: 12px; color: #f66; min-height: 16px; }
+
+    #shuffle-label {
+      font-size: 13px;
+      color: #aaa;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    #main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    #canvas-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      background: #111;
+    }
+
+    #canvas { cursor: crosshair; display: block; }
+
+    #empty-msg {
+      color: #666;
+      font-size: 18px;
+      display: none;
+    }
+
+    #sidebar {
+      width: 200px;
+      background: #2a2a2a;
+      border-left: 1px solid #444;
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      gap: 12px;
+    }
+
+    .section-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #888;
+      margin-bottom: 6px;
+    }
+
+    #class-buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .class-btn {
+      padding: 8px 12px;
+      border: 2px solid transparent;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      background: #333;
+      color: #ddd;
+      text-align: left;
+    }
+
+    .class-btn:hover { background: #3a3a3a; }
+    .class-btn.active { border-color: currentColor; background: #1a1a1a; }
+
+    .hint {
+      font-size: 11px;
+      color: #666;
+      line-height: 1.5;
+    }
+
+    #actions {
+      margin-top: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    button.action {
+      padding: 9px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    #btn-submit { background: #2e7d32; color: #fff; }
+    #btn-submit:hover { background: #388e3c; }
+    #btn-no-detection { background: #444; color: #ccc; }
+    #btn-no-detection:hover { background: #555; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Annotate</h1>
+  <span id="filename">Loading...</span>
+  <div id="search">
+    <input id="search-input" type="text" placeholder="image name…" />
+    <button id="search-btn">Go</button>
+  </div>
+  <div id="search-error"></div>
+  <label id="shuffle-label">
+    <input type="checkbox" id="shuffle-checkbox" checked /> Random
+  </label>
+  <span id="stats"></span>
+</div>
+
+<div id="main">
+  <div id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+    <div id="empty-msg">No images pending annotation</div>
+  </div>
+
+  <div id="sidebar">
+    <div>
+      <div class="section-label">Class</div>
+      <div id="class-buttons"></div>
+    </div>
+
+    <div class="hint">
+      Draw: click &amp; drag<br>
+      Select: click box<br>
+      Delete: Delete key
+    </div>
+
+    <div id="actions">
+      <button class="action" id="btn-no-detection">No Detection</button>
+      <button class="action" id="btn-submit">Submit</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const CLASS_COLORS = ['#ff9800', '#2196f3', '#e91e63', '#4caf50', '#9c27b0'];
+
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  let classes = [];
+  let currentImage = null;
+  let boxes = [];
+  let selectedClass = 0;
+  let selectedBox = -1;
+  let drawing = false;
+  let dragStart = null;
+  let dragCurrent = null;
+  const img = new Image();
+
+  // --- Init ---
+
+  async function init() {
+    await loadStats();
+    await loadNext();
+  }
+
+  async function loadStats() {
+    try {
+      const r = await fetch('/annotate/stats');
+      const data = await r.json();
+      document.getElementById('stats').textContent =
+        `${data.annotated} annotated · ${data.pending} pending`;
+    } catch {}
+  }
+
+  async function loadImage(imageName, url) {
+    currentImage = imageName;
+    boxes = [];
+    selectedBox = -1;
+    buildClassButtons();
+    document.getElementById('filename').textContent = currentImage;
+    document.getElementById('empty-msg').style.display = 'none';
+    canvas.style.display = 'block';
+    img.onload = () => { fitCanvas(); render(); };
+    img.src = url;
+  }
+
+  async function loadNext() {
+    try {
+      const shuffle = document.getElementById('shuffle-checkbox').checked;
+      const params = new URLSearchParams({ shuffle, after: currentImage ?? '' });
+      const r = await fetch(`/annotate/next?${params}`);
+      if (r.status === 404) { showEmpty(); return; }
+      const data = await r.json();
+      classes = data.classes;
+      await loadImage(data.image_name, `/annotate/image/${data.image_name}`);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function loadSpecific(imageName) {
+    const errEl = document.getElementById('search-error');
+    errEl.textContent = '';
+    try {
+      const r = await fetch(`/annotate/specific/${encodeURIComponent(imageName)}`);
+      if (r.status === 404) { errEl.textContent = 'Image not found'; return; }
+      const data = await r.json();
+      classes = data.classes;
+      await loadImage(data.image_name, `/annotate/image/${data.image_name}`);
+    } catch (e) {
+      errEl.textContent = 'Error loading image';
+    }
+  }
+
+  function showEmpty() {
+    document.getElementById('filename').textContent = '';
+    document.getElementById('empty-msg').style.display = 'block';
+    canvas.style.display = 'none';
+  }
+
+  // --- Canvas sizing ---
+
+  function fitCanvas() {
+    const wrap = document.getElementById('canvas-wrap');
+    const maxW = wrap.clientWidth - 20;
+    const maxH = wrap.clientHeight - 20;
+    const scale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight, 1);
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+  }
+
+  // --- Coordinate conversion ---
+
+  function normToCanvas(nx, ny, nw, nh) {
+    return {
+      x: (nx - nw / 2) * canvas.width,
+      y: (ny - nh / 2) * canvas.height,
+      w: nw * canvas.width,
+      h: nh * canvas.height,
+    };
+  }
+
+  function canvasToNorm(x, y, w, h) {
+    return {
+      x: (x + w / 2) / canvas.width,
+      y: (y + h / 2) / canvas.height,
+      w: Math.abs(w) / canvas.width,
+      h: Math.abs(h) / canvas.height,
+    };
+  }
+
+  function mousePos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  // --- Render ---
+
+  function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    boxes.forEach((box, i) => {
+      const { x, y, w, h } = normToCanvas(box.x, box.y, box.w, box.h);
+      const color = CLASS_COLORS[box.class_id % CLASS_COLORS.length];
+      ctx.strokeStyle = color;
+      ctx.lineWidth = i === selectedBox ? 3 : 2;
+      ctx.strokeRect(x, y, w, h);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.15;
+      ctx.fillRect(x, y, w, h);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = color;
+      ctx.font = 'bold 12px sans-serif';
+      ctx.fillText(classes[box.class_id] ?? box.class_id, x + 3, y + 13);
+    });
+
+    if (drawing && dragStart && dragCurrent) {
+      const x = dragStart.x, y = dragStart.y;
+      const w = dragCurrent.x - x, h = dragCurrent.y - y;
+      const color = CLASS_COLORS[selectedClass % CLASS_COLORS.length];
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(x, y, w, h);
+      ctx.setLineDash([]);
+    }
+  }
+
+  // --- Mouse events ---
+
+  canvas.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    const pos = mousePos(e);
+    const hit = hitTest(pos);
+    if (hit !== -1) {
+      selectedBox = hit;
+      render();
+      return;
+    }
+    selectedBox = -1;
+    drawing = true;
+    dragStart = pos;
+    dragCurrent = pos;
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (!drawing) return;
+    dragCurrent = mousePos(e);
+    render();
+  });
+
+  canvas.addEventListener('mouseup', () => {
+    if (!drawing) return;
+    drawing = false;
+    const dx = dragCurrent.x - dragStart.x;
+    const dy = dragCurrent.y - dragStart.y;
+    if (Math.abs(dx) > 8 && Math.abs(dy) > 8) {
+      const x = dx < 0 ? dragCurrent.x : dragStart.x;
+      const y = dy < 0 ? dragCurrent.y : dragStart.y;
+      const norm = canvasToNorm(x, y, Math.abs(dx), Math.abs(dy));
+      boxes.push({ class_id: selectedClass, ...norm });
+      selectedBox = boxes.length - 1;
+    }
+    dragStart = dragCurrent = null;
+    render();
+  });
+
+  document.addEventListener('keydown', e => {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedBox !== -1) {
+      boxes.splice(selectedBox, 1);
+      selectedBox = Math.min(selectedBox, boxes.length - 1);
+      render();
+    }
+  });
+
+  function hitTest(pos) {
+    for (let i = boxes.length - 1; i >= 0; i--) {
+      const { x, y, w, h } = normToCanvas(boxes[i].x, boxes[i].y, boxes[i].w, boxes[i].h);
+      if (pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h) return i;
+    }
+    return -1;
+  }
+
+  // --- Class buttons ---
+
+  function buildClassButtons() {
+    const container = document.getElementById('class-buttons');
+    container.innerHTML = '';
+    classes.forEach((name, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'class-btn' + (i === selectedClass ? ' active' : '');
+      btn.style.color = CLASS_COLORS[i % CLASS_COLORS.length];
+      btn.textContent = name;
+      btn.addEventListener('click', () => {
+        selectedClass = i;
+        if (selectedBox !== -1) {
+          boxes[selectedBox].class_id = i;
+          render();
+        }
+        document.querySelectorAll('.class-btn').forEach((b, j) =>
+          b.classList.toggle('active', j === i)
+        );
+      });
+      container.appendChild(btn);
+    });
+  }
+
+  // --- Actions ---
+
+  async function submit(labels) {
+    if (!currentImage) return;
+    await fetch(`/annotate/${currentImage}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ labels }),
+    });
+    await loadStats();
+    await loadNext();
+  }
+
+  document.getElementById('btn-submit').addEventListener('click', () => submit(boxes));
+  document.getElementById('btn-no-detection').addEventListener('click', () => submit([]));
+
+  document.getElementById('search-btn').addEventListener('click', () => {
+    const val = document.getElementById('search-input').value.trim();
+    if (val) loadSpecific(val);
+  });
+
+  document.getElementById('search-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      const val = e.target.value.trim();
+      if (val) loadSpecific(val);
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    if (img.complete && img.naturalWidth) { fitCanvas(); render(); }
+  });
+
+  init();
+</script>
+</body>
+</html>

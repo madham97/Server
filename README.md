@@ -1,130 +1,208 @@
-# Rodent Server
+# Monitoring Pipeline — Server
 
-Receives image and video uploads from Raspberry Pi edge devices over GSM, runs YOLOv8 object detection on video files, and tracks detected objects across sessions in a SQLite database.
+Receives images from Raspberry Pi field devices, runs YOLOv8 object detection, and provides an annotation + training pipeline for building custom detection models.
 
-## Requirements
+## Setup
 
-- Python 3.8+
-- GPU with CUDA recommended for inference (falls back to CPU automatically)
-- ngrok or equivalent for public access from GSM devices
-
-## Installation
+**Requirements:** Python 3.13, CUDA-capable GPU recommended.
 
 ```bash
 cd Server
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
+py -3.13 -m venv venv
+venv\Scripts\activate
+pip install torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu126
 pip install -r requirements.txt
 ```
 
 ## Running
 
+### Local (development)
+
 ```bash
-python -m uvicorn app:app --host 0.0.0.0 --port 8000
+uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-**Expose publicly for GSM devices (no static IP):**
+Expose publicly (e.g. for a Pi on cellular):
 ```bash
-ngrok http --scheme=http 8000
+ngrok http --scheme http 8000
 ```
 
-Copy the ngrok URL into `server_url` in the client's `client.json`.
+### Shared server (Docker)
+
+Requires Docker. Model weights (`models/best.pt`) must be copied to the server manually as they are gitignored.
+
+```bash
+# On the server — first time setup
+git clone -b <branch> https://github.com/madham97/Server.git ~/Server
+cd ~/Server
+mkdir -p models uploads processed annotated failed dataset thermal
+
+# Copy model weights from local machine
+scp /path/to/models/best.pt user@<server-ip>:~/Server/models/
+
+# Build and start (runs in background, restarts on reboot)
+docker compose up -d --build
+```
+
+Check the server is up:
+```bash
+curl http://localhost:8000/health
+```
+
+View logs:
+```bash
+docker compose logs --tail=20
+```
+
+Stop cleanly:
+```bash
+docker compose down
+```
+
+#### Exposing publicly via ngrok (no sudo required)
+
+Download ngrok into the repo directory:
+```bash
+curl -O https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+tar -xzf ngrok-v3-stable-linux-amd64.tgz
+./ngrok config add-authtoken <your-token>
+```
+
+Run in background so it survives terminal disconnect:
+```bash
+nohup ./ngrok http --scheme http 8000 > ~/ngrok.log 2>&1 &
+```
+
+Get the assigned public URL:
+```bash
+curl http://localhost:4040/api/tunnels
+```
+
+> **Note:** The free ngrok URL changes every time ngrok restarts.
 
 ## Endpoints
 
+### Device upload
+
 | Method | Path | Description |
-|---|---|---|
-| `POST` | `/upload` | Receive image or video from a client device |
+|--------|------|-------------|
+| `POST` | `/upload` | Receive an image from a client device |
 | `GET` | `/health` | Liveness check |
-| `GET` | `/config-help` | Interactive SMS config builder for client devices |
-| `GET` | `/docs` | Swagger UI (auto-generated) |
+| `GET` | `/processing` | Check whether inference is enabled |
+| `POST` | `/processing?enabled=true\|false` | Enable or disable background inference at runtime |
 
-### Upload format
+The `/upload` endpoint accepts `multipart/form-data` with:
 
-Multipart form POST with the following fields:
+| Field | Type | Description |
+|-------|------|-------------|
+| `image` | file | JPEG or PNG (WebP accepted and converted). Thermal-fused RGBA WebP is split into JPEG + thermal sidecar (see below). |
+| `device_id` | text | Identifier of the sending device |
+| `mode` | text | Recording mode (`image_motion`, `image_interval`) |
+| `motion_score` | text | Motion ratio that triggered capture |
+| `timestamp` | text | ISO 8601 capture time |
+| `format` | text | Format hint sent by the Pi (currently informational only) |
+| `thermal_min_c` | text | Minimum temperature (°C) in the thermal frame, if present |
+| `thermal_max_c` | text | Maximum temperature (°C) in the thermal frame, if present |
+| `thermal_avg_c` | text | Average temperature (°C) in the thermal frame, if present |
 
-| Field | Required | Description |
-|---|---|---|
-| `image` or `video` | Yes | The file (JPEG, WebP, or MP4) |
-| `device_id` | No | Hostname of the sending device |
-| `mode` | No | Recording mode (`image_motion`, `segment`, etc.) |
-| `motion_score` | No | Fraction of pixels that changed (0–1) |
-| `timestamp` | No | UTC capture time (ISO 8601) |
+Thermal-fused frames (RGBA WebP — visible image in RGB, normalized thermal map in alpha) are
+split on receipt: the RGB is saved as a normal JPEG to `uploads/`, and the alpha channel is
+saved as `thermal/<stem>_thermal.png` with a `thermal/<stem>_thermal.json` sidecar carrying
+`thermal_min_c`/`max_c`/`avg_c` (needed to reconstruct real degrees from the 0-255 alpha).
 
-WebP images are automatically converted to JPEG on receipt.
+### Annotation
 
-## Upload log
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/annotate` | Open annotation UI in browser |
+| `GET` | `/annotate/next` | Next random unannotated image + class list |
+| `GET` | `/annotate/specific/{image_name}` | Load a specific image by name |
+| `GET` | `/annotate/image/{image_name}` | Serve raw image file |
+| `POST` | `/annotate/{image_name}` | Save labels for an image |
+| `GET` | `/annotate/stats` | Pending count, annotated count, per-class totals |
 
-Every received upload is appended to `upload_log.txt` as a tab-separated line:
+### Inference
 
-```
-received_at    filename    device_id    mode    motion_score    capture_timestamp
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/infer/test?n=5` | Run inference on `n` random images from `uploads/` |
 
-Example:
-```
-2026-04-20T14:56:23Z	image_20260420T145057Z.jpg	rodent2	image_motion	0.065	2026-04-20T14:50:58Z
-```
+### Dataset & training
 
-## Video processing pipeline
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/dataset/export` | Export annotated images to YOLO training format |
+| `GET` | `/dataset/stats` | Current dataset export state |
+| `POST` | `/train/start` | Start training in the background |
+| `GET` | `/train/status` | Current epoch, metrics, state |
+| `POST` | `/train/promote` | Promote candidate model to `models/best.pt` |
 
-1. Uploaded videos land in `uploads/`
-2. A background watcher polls every 5 seconds
-3. Stable files are processed with YOLOv8 (`models/best.pt`)
-4. Detection labels are written to `processed/{video_name}/labels/`
-5. Object tracks are linked across video chunks using IoU matching
-6. Results are stored in `objects.db`
-7. Original video is moved to `processed/{video_name}/`
+## Training workflow
 
-### File naming convention
+1. Annotate images at `http://localhost:8000/annotate`
+2. Export dataset: `POST /dataset/export?val_split=0.2`
+3. Start training: `POST /train/start?epochs=100&imgsz=640`
+4. Monitor: `GET /train/status`
+5. Promote: `POST /train/promote` (requires mAP50 ≥ 0.3)
 
-Video filenames should embed a UTC timestamp for correct chronological ordering:
+Training parameters (`POST /train/start`):
 
-```
-video_YYYYMMDDThhmmssZ_[number].mp4
-```
-
-Example: `video_20260420T145057Z_1.mp4`
-
-## Database
-
-SQLite database at `objects.db` with three tables:
-
-| Table | Description |
-|---|---|
-| `objects` | Persistent tracked entities with first/last seen times and confidence |
-| `sightings` | Individual per-frame detections with bounding box and confidence |
-| `active_tracks` | Current track state used to link detections across video chunks |
-
-Inspect the database:
-
-```bash
-python inspect_db.py --db objects.db
-```
-
-## SMS config helper
-
-Open `http://<server>/config-help` in a browser to build config patch SMS messages for client devices interactively. Select a config key, enter a value, and copy the JSON to send as a text to the device's SIM number.
+| Param | Default | Description |
+|-------|---------|-------------|
+| `base_model` | `yolov8n.pt` | Base YOLO checkpoint to train from |
+| `epochs` | `100` | Number of training epochs |
+| `imgsz` | `640` | Input image size (square) |
 
 ## Folder structure
 
 ```
-uploads/          Incoming files (cleared after processing)
-processed/
-  {video_name}/
-    labels/       YOLO detection label files per frame
-    {video}.avi   Annotated output video
+app.py                  — FastAPI entry point, background watcher
+config.py               — All configuration
+state.py                — Shared watcher state
+trainer.py              — YOLO training logic
+inference.py            — YOLO inference wrapper
+routers/
+  upload.py             — POST /upload
+  annotate.py           — /annotate/* endpoints
+  export.py             — /dataset/* endpoints
+  train.py              — /train/* endpoints
+  infer.py              — /infer/* endpoints
+static/
+  annotate.html         — Annotation UI
+classes.json            — Class definitions (rat, human)
 models/
-  best.pt         YOLOv8 weights
-objects.db        Tracked object database
-upload_log.txt    Tab-separated upload history
+  best.pt               — Live model weights (gitignored)
+  candidate.pt          — Staged model after training (gitignored)
+  runs/                 — Training run outputs (gitignored)
+  archive/              — Superseded model versions (gitignored)
+uploads/                — All received images (gitignored)
+thermal/                — Thermal PNG + JSON sidecar split from RGBA uploads (gitignored)
+processed/              — YOLO inference outputs (gitignored)
+annotated/              — Human-confirmed label files (gitignored)
+dataset/                — Exported training dataset (gitignored)
 ```
+
+## Configuration
+
+All settings are in `config.py`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `POLL_INTERVAL` | `5` | Seconds between watcher cycles |
+| `MAX_PROCESS_ATTEMPTS` | `3` | Retries before moving to `failed/` |
+| `BASE_MODEL` | `yolov8n.pt` | Default base model for training |
+| `TRAIN_EPOCHS` | `100` | Default training epochs |
+| `TRAIN_IMGSZ` | `640` | Default training image size |
+| `MIN_MAP` | `0.3` | Minimum mAP50 required for promotion |
+| `MODEL_CONF` | `0.25` | Inference confidence threshold |
+| `MODEL_IOU` | `0.45` | Inference IOU threshold |
 
 ## Troubleshooting
 
-| Symptom | Check |
-|---|---|
-| Videos not processing | Filename includes timestamp? Check server logs |
-| No detections | `models/best.pt` present? Confidence threshold in `inference.py` |
-| Database locked | Only one server instance running? |
-| Port in use | `--port 8001` to use a different port |
+| Symptom | Fix |
+|---------|-----|
+| Images not processed | Call `POST /processing?enabled=true` to enable background inference |
+| Training fails immediately | Windows DataLoader issue — `workers=0` is set by default |
+| YOLO saves to `runs/detect/...` | Ensure trainer uses absolute project path (already fixed) |
+| Port conflict | `uvicorn app:app --port 8001` |
+| CUDA not detected | Reinstall PyTorch with CUDA: `pip install torch --index-url https://download.pytorch.org/whl/nightly/cu126` |
