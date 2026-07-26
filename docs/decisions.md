@@ -104,7 +104,17 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 **Why it worked:** The Pi's GSM/cellular modem uploader needs plain, unredirected HTTP — `--scheme http` was chosen originally for exactly that reason. But `.dev` is a Google-owned gTLD that is unconditionally HSTS-preloaded in every modern browser: any `*.ngrok-free.dev` URL is force-upgraded to https client-side, permanently, with no way to opt out via site settings, HSTS deletion, or "always use secure connections" toggles (those only affect dynamic/per-site HSTS, not TLD-level preload entries baked into the browser). So an http-only tunnel is invisible to browsers — they get ngrok's `ERR_NGROK_3200` "offline" page over https, not even a real connection failure. Running a second agent in default https mode on the same domain answers browser requests correctly (ngrok can actually terminate TLS) while leaving the Pi's http-only tunnel untouched.
 
-**Trade-off:** Both `ngrok` processes are unmanaged background processes (`nohup ... &`), not a service — they don't survive a host reboot and need to be restarted manually (or wired into `systemd`/`docker compose` if that becomes a recurring pain).
+**Trade-off:** Originally both `ngrok` processes were unmanaged background processes (`nohup ... &`), not a service — see the systemd entry below for why that turned out not to be durable enough and what replaced it.
+
+---
+
+### ngrok tunnels moved to `systemd --user` services with lingering enabled
+
+**Decision:** Both ngrok tunnels run as `systemd --user` services (`deploy/systemd/ngrok-http.service`, `deploy/systemd/ngrok-https.service`), `Restart=always`, with `loginctl enable-linger` set for the account so the user's systemd instance — and these services — keep running with no active login session.
+
+**Why it worked:** A `nohup ... & disown` ngrok process survived three weeks in one instance, which made it look durable enough. It isn't, in general: a later pair of tunnels, started via the CLI harness's own background-task tracking (not manual `nohup`), were both killed outright — silently, no crash, no error — when a session boundary was crossed overnight. Since ngrok is what makes the Pi's uploads reachable at all, that gap meant the device was silently failing to upload with nothing to signal it. The actual failure mode wasn't about *how* the process was backgrounded (`nohup` vs. the harness) so much as that neither approach detaches a process from every possible session/lineage boundary, and neither one restarts itself after any kind of interruption. `systemd --user` plus lingering does both: it's independent of any particular shell/session, and `Restart=always` means a crash (or the same kind of session-boundary kill, if that mechanism recurs elsewhere) self-heals in seconds instead of requiring someone to notice.
+
+**Trade-off:** `loginctl enable-linger` is host-account state, not something version control can capture — it has to be run once per machine/account during setup (see `deploy/systemd/README.md`). The unit files themselves are portable (`%h` specifier for the home directory) and live in the repo.
 
 ---
 

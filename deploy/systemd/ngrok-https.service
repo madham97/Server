@@ -1,0 +1,16 @@
+[Unit]
+Description=ngrok tunnel (HTTPS, for browser access to /thermal, /config-help, etc.)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Server
+ExecStart=%h/Server/ngrok http 8000 --log stdout
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/ngrok2.log
+StandardError=append:%h/ngrok2.log
+
+[Install]
+WantedBy=default.target

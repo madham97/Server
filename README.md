@@ -68,9 +68,15 @@ tar -xzf ngrok-v3-stable-linux-amd64.tgz
 ./ngrok config add-authtoken <your-token>
 ```
 
-Run in background so it survives terminal disconnect:
+**`--scheme http` is required for the Pi**, not optional: the GSM modem uploader can't follow redirects or negotiate TLS, so the tunnel must serve plain HTTP with no https upgrade. The tradeoff is that plain HTTP tunnels are effectively unreachable from a browser if the domain is under a gTLD with mandatory HSTS preloading (e.g. `.dev`, `.app`) — the browser force-upgrades to https before ever making a request, and no site setting or HSTS-deletion can override a TLD-level preload entry. If you need browser access (e.g. for `/thermal` or `/config-help`) on such a domain, run a **second** ngrok agent against the same domain in default mode, which is https-capable. Both agents can run simultaneously against the same static domain, split by scheme — the Pi keeps using `http://`, browsers use `https://`.
+
+Run both as durable `systemd --user` services (survives reboots, crashes, and CLI/session disconnects — see `deploy/systemd/README.md` for why this matters over a plain `nohup ... &`):
 ```bash
-nohup ./ngrok http --scheme http 8000 > ~/ngrok.log 2>&1 &
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/ngrok-*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ngrok-http.service ngrok-https.service
+loginctl enable-linger "$USER"   # required, or both die on full logout
 ```
 
 Get the assigned public URL:
@@ -79,12 +85,6 @@ curl http://localhost:4040/api/tunnels
 ```
 
 > **Note:** If this account has a claimed static domain, the same public URL persists across restarts. Otherwise a free-tier random URL changes every time ngrok restarts.
-
-**`--scheme http` is required for the Pi**, not optional: the GSM modem uploader can't follow redirects or negotiate TLS, so the tunnel must serve plain HTTP with no https upgrade. The tradeoff is that plain HTTP tunnels are effectively unreachable from a browser if the domain is under a gTLD with mandatory HSTS preloading (e.g. `.dev`, `.app`) — the browser force-upgrades to https before ever making a request, and no site setting or HSTS-deletion can override a TLD-level preload entry. If you need browser access (e.g. for `/thermal` or `/config-help`) on such a domain, run a **second** ngrok agent against the same domain in default mode, which is https-capable:
-```bash
-nohup ./ngrok http 8000 > ~/ngrok-https.log 2>&1 &
-```
-Both agents can run simultaneously against the same static domain, split by scheme — the Pi keeps using `http://`, browsers use `https://`. Neither agent is a managed service; both need restarting manually after a reboot.
 
 ## Endpoints
 
