@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Thermal Calibration</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: sans-serif; background: #1a1a1a; color: #e0e0e0; margin: 0; padding: 16px; }
+  h1 { font-size: 16px; color: #fff; margin: 0 0 4px; }
+  p.sub { color: #999; font-size: 13px; margin: 0 0 16px; max-width: 900px; }
+
+  #autoBox { background: #222; border: 1px solid #444; border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+  #controls { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+  select, button {
+    background: #2a2a2a; border: 1px solid #555; color: #e0e0e0;
+    border-radius: 4px; padding: 6px 10px; font-size: 13px; cursor: pointer;
+  }
+  select { min-width: 340px; }
+  button:hover { background: #3a3a3a; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #submitBtn { background: #245; border-color: #4af; }
+  #status { font-size: 13px; color: #7cf; margin-left: auto; }
+  #totalLine { font-size: 12px; color: #999; margin-bottom: 14px; }
+  #totalLine b { color: #afa; }
+
+  .panes { display: flex; gap: 12px; }
+  .pane { flex: 1; min-width: 0; }
+  .pane h2 { font-size: 12px; color: #999; font-weight: normal; margin: 0 0 6px; text-align: center; }
+  .imgwrap { position: relative; background: #000; border-radius: 6px; overflow: hidden; }
+  .imgwrap img { width: 100%; display: block; user-select: none; cursor: crosshair; }
+  .box {
+    position: absolute; border: 2px solid #f55; background: rgba(255, 80, 80, 0.15);
+    pointer-events: none; box-sizing: border-box;
+  }
+  .box.pending { border-color: #fd6; background: rgba(255, 220, 80, 0.15); border-style: dashed; }
+  .box.drawing { border-color: #7cf; background: rgba(120, 200, 255, 0.15); }
+  .box .label {
+    position: absolute; top: -1px; left: -1px; background: #f55; color: #fff;
+    font-size: 10px; font-weight: bold; padding: 0 4px; line-height: 14px;
+  }
+  .box.pending .label { background: #fd6; color: #222; }
+
+  #preview { margin-top: 20px; display: none; }
+  #preview h2 { font-size: 13px; color: #7cf; }
+  #overlayWrap { position: relative; max-width: 640px; background: #000; border-radius: 6px; overflow: hidden; min-height: 60px; }
+  #overlayWrap img { width: 100%; display: block; }
+  #overlayWrap img.top { position: absolute; top: 0; left: 0; mix-blend-mode: normal; opacity: 0.7; }
+  #opacityRow { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: #999; }
+  #alignedMissing { display: none; padding: 10px 14px; color: #f88; font-size: 12px; }
+
+  #log { font-size: 12px; margin-top: 8px; min-height: 16px; }
+
+  #stats { margin-top: 20px; display: none; }
+  #stats h2 { font-size: 13px; color: #7cf; }
+  #stats table { border-collapse: collapse; font-size: 12px; width: 100%; max-width: 700px; }
+  #stats th { text-align: left; color: #999; border-bottom: 1px solid #444; padding: 4px 8px; }
+  #stats td { padding: 4px 8px; border-bottom: 1px solid #2a2a2a; }
+  #stats a.jumpStem { color: inherit; text-decoration: underline; }
+  #stats button.delRow {
+    background: none; border: 1px solid #555; color: #e0e0e0; border-radius: 3px;
+    padding: 1px 6px; font-size: 11px; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+
+<h1>Thermal Calibration</h1>
+<p class="sub">
+  Drag a box around the animal on the RGB image, then drag a box around the same animal on the thermal
+  image. A box tolerates imprecise drawing much better than a single click, since its center <i>and</i>
+  size both constrain the fit. Add box pairs across as many images as you like (they accumulate), then
+  submit with at least 3 &mdash; more, spread across several images, is better.
+</p>
+
+<div id="autoBox">
+  <button id="autoBtn">Run automatic calibration</button>
+  <span style="font-size:12px; color:#999; max-width:600px;">
+    Scans every capture, finds whatever stands out most from the background in each spectrum independently
+    (background subtraction, no drawing), and fits a calibration from however many frames agree. Overwrites
+    the current calibration below &mdash; draw boxes afterward if you want to refine it further.
+  </span>
+  <span id="autoStatus" style="font-size:12px; color:#7cf;"></span>
+</div>
+
+<div id="controls">
+  <button id="prevBtn">&larr; Prev</button>
+  <select id="picker"></select>
+  <button id="nextBtn">Next &rarr;</button>
+  <button id="undoBtn">Undo last</button>
+  <button id="resetBtn">Reset this image</button>
+  <button id="submitBtn" disabled>Submit (0 total pairs)</button>
+  <label style="font-size:12px; color:#999; display:flex; align-items:center; gap:4px;">
+    <input type="checkbox" id="snapToggle" checked>
+    snap thermal box to blob extent
+  </label>
+  <span id="status">Drag a box on the RGB image first</span>
+</div>
+<div id="totalLine">Total accumulated: <b id="totalCount">0</b> pairs across <b id="totalImages">0</b> image(s)</div>
+
+<div class="panes">
+  <div class="pane">
+    <h2>rgb</h2>
+    <div class="imgwrap" id="rgbWrap"><img id="rgbImg" src="" draggable="false"></div>
+  </div>
+  <div class="pane">
+    <h2>thermal</h2>
+    <div class="imgwrap" id="thermalWrap"><img id="thermalImg" src="" draggable="false"></div>
+  </div>
+</div>
+<canvas id="thermalCanvas" style="display:none;"></canvas>
+
+<div id="log"></div>
+
+<div id="preview">
+  <h2>Preview: aligned thermal over RGB (this image)</h2>
+  <div id="overlayWrap">
+    <img id="overlayRgb" src="">
+    <img id="overlayAligned" class="top" src="">
+    <div id="alignedMissing">Not aligned yet — this capture arrived after the last calibration ran.</div>
+  </div>
+  <div id="opacityRow">
+    <span>thermal opacity</span>
+    <input type="range" id="opacitySlider" min="0" max="100" value="70">
+  </div>
+</div>
+
+<div id="stats">
+  <h2>Calibration box stats</h2>
+  <p id="statsSummary" style="font-size:12px; color:#999; margin:0 0 8px;"></p>
+  <table>
+    <thead>
+      <tr><th>image</th><th>IoU</th><th>status</th><th></th></tr>
+    </thead>
+    <tbody id="statsBody"></tbody>
+  </table>
+</div>
+
+<script>
+let candidates = [];
+let currentStem = null;
+let allPairs = [];        // {stem, rgb:[x1,y1,x2,y2], thermal:[x1,y1,x2,y2]}, persists across image switches
+let pendingRgbBox = null; // [x1,y1,x2,y2] awaiting its thermal match, current image only
+let statsBoxes = [];
+
+const picker = document.getElementById('picker');
+const rgbImg = document.getElementById('rgbImg');
+const thermalImg = document.getElementById('thermalImg');
+const rgbWrap = document.getElementById('rgbWrap');
+const thermalWrap = document.getElementById('thermalWrap');
+const statusEl = document.getElementById('status');
+const submitBtn = document.getElementById('submitBtn');
+const logEl = document.getElementById('log');
+const snapToggle = document.getElementById('snapToggle');
+const thermalCanvas = document.getElementById('thermalCanvas');
+
+function setLog(message, isError) {
+  logEl.textContent = message || '';
+  logEl.style.color = isError ? '#f88' : '#8f8';
+}
+
+async function loadCandidates() {
+  const res = await fetch('/thermal/calibrate/candidates');
+  candidates = await res.json();
+  picker.innerHTML = candidates.map(c =>
+    `<option value="${c.stem}">${c.stem} — ${c.device_id} ${c.timestamp}</option>`
+  ).join('');
+  if (candidates.length) selectStem(candidates[0].stem);
+  else statusEl.textContent = 'No RGB/thermal pairs available yet';
+}
+
+function selectStem(stem) {
+  currentStem = stem;
+  picker.value = stem;
+  const c = candidates.find(x => x.stem === stem);
+  rgbImg.src = `/annotate/image/${c.source_image}`;
+  thermalImg.src = `/thermal/image/${stem}_thermal.png`;
+  pendingRgbBox = null;
+  render();
+  showAlignedPreview(stem, c.source_image);
+}
+
+function showAlignedPreview(stem, sourceImage) {
+  const preview = document.getElementById('preview');
+  const overlayAligned = document.getElementById('overlayAligned');
+  const alignedMissing = document.getElementById('alignedMissing');
+  preview.style.display = 'block';
+  overlayAligned.onload = () => { overlayAligned.style.display = ''; alignedMissing.style.display = 'none'; };
+  overlayAligned.onerror = () => { overlayAligned.style.display = 'none'; alignedMissing.style.display = 'block'; };
+  document.getElementById('overlayRgb').src = `/annotate/image/${sourceImage}`;
+  overlayAligned.src = `/thermal/image/${stem}_thermal_aligned.png?t=${Date.now()}`;
+}
+
+function render() {
+  [...rgbWrap.querySelectorAll('.box')].forEach(b => b.remove());
+  [...thermalWrap.querySelectorAll('.box')].forEach(b => b.remove());
+
+  const forThisImage = allPairs
+    .map((p, i) => ({ ...p, globalIndex: i + 1 }))
+    .filter(p => p.stem === currentStem);
+
+  forThisImage.forEach(p => {
+    addBox(rgbWrap, rgbImg, p.rgb, p.globalIndex, false);
+    addBox(thermalWrap, thermalImg, p.thermal, p.globalIndex, false);
+  });
+
+  if (pendingRgbBox) {
+    addBox(rgbWrap, rgbImg, pendingRgbBox, '?', true);
+  }
+
+  document.getElementById('totalCount').textContent = allPairs.length;
+  document.getElementById('totalImages').textContent = new Set(allPairs.map(p => p.stem)).size;
+  submitBtn.textContent = `Submit (${allPairs.length} total pairs)`;
+  submitBtn.disabled = allPairs.length < 2;
+
+  const idx = candidates.findIndex(c => c.stem === currentStem);
+  document.getElementById('prevBtn').disabled = idx <= 0;
+  document.getElementById('nextBtn').disabled = idx === -1 || idx >= candidates.length - 1;
+
+  if (pendingRgbBox) {
+    statusEl.textContent = 'Now drag a box around the same animal on the thermal image';
+  } else {
+    statusEl.textContent = `Drag a box on the RGB image (${forThisImage.length} pair(s) added from this image)`;
+  }
+}
+
+function addBox(wrap, img, box, label, pending) {
+  const el = document.createElement('div');
+  el.className = 'box' + (pending ? ' pending' : '');
+  const [x1, y1, x2, y2] = box;
+  el.style.left = (x1 / img.naturalWidth * 100) + '%';
+  el.style.top = (y1 / img.naturalHeight * 100) + '%';
+  el.style.width = ((x2 - x1) / img.naturalWidth * 100) + '%';
+  el.style.height = ((y2 - y1) / img.naturalHeight * 100) + '%';
+  const lab = document.createElement('span');
+  lab.className = 'label';
+  lab.textContent = label;
+  el.appendChild(lab);
+  wrap.appendChild(el);
+}
+
+function pointToNatural(e, img) {
+  const rect = img.getBoundingClientRect();
+  const xFrac = (e.clientX - rect.left) / rect.width;
+  const yFrac = (e.clientY - rect.top) / rect.height;
+  return [xFrac * img.naturalWidth, yFrac * img.naturalHeight];
+}
+
+thermalImg.addEventListener('load', () => {
+  thermalCanvas.width = thermalImg.naturalWidth;
+  thermalCanvas.height = thermalImg.naturalHeight;
+  thermalCanvas.getContext('2d').drawImage(thermalImg, 0, 0);
+});
+
+// Refines a manually-drawn thermal box to the actual extent of the warmest blob
+// overlapping it: thresholds a window somewhat larger than the drawn box (so a
+// loosely-drawn box still finds the blob) and takes the connected component whose
+// bounding box overlaps the drawn box the most. Falls back to the drawn box if
+// nothing clears a basic contrast bar, or if no component actually overlaps it.
+function snapBoxToBlob(box, marginFrac = 0.6) {
+  const [x1, y1, x2, y2] = box;
+  const w = thermalCanvas.width, h = thermalCanvas.height;
+  const mx = (x2 - x1) * marginFrac, my = (y2 - y1) * marginFrac;
+  const wx0 = Math.max(0, Math.floor(x1 - mx)), wy0 = Math.max(0, Math.floor(y1 - my));
+  const wx1 = Math.min(w, Math.ceil(x2 + mx)), wy1 = Math.min(h, Math.ceil(y2 + my));
+  const ww = wx1 - wx0, hh = wy1 - wy0;
+  if (ww <= 0 || hh <= 0) return box;
+
+  const data = thermalCanvas.getContext('2d').getImageData(wx0, wy0, ww, hh).data;
+  let min = 255, max = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const v = data[i];
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (max - min < 8) return box;
+  const threshold = min + (max - min) * 0.55;
+
+  // Flood-fill connected components on the thresholded window (4-connectivity, iterative).
+  const mask = new Uint8Array(ww * hh);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) mask[p] = data[i] >= threshold ? 1 : 0;
+
+  const labels = new Int32Array(ww * hh).fill(-1);
+  let bestOverlap = -1, bestBox = null;
+  const stack = [];
+  for (let start = 0; start < mask.length; start++) {
+    if (mask[start] !== 1 || labels[start] !== -1) continue;
+    stack.length = 0;
+    stack.push(start);
+    labels[start] = start;
+    let bx0 = ww, by0 = hh, bx1 = 0, by1 = 0;
+    while (stack.length) {
+      const p = stack.pop();
+      const px = p % ww, py = (p / ww) | 0;
+      if (px < bx0) bx0 = px; if (px > bx1) bx1 = px;
+      if (py < by0) by0 = py; if (py > by1) by1 = py;
+      const neighbors = [p - 1, p + 1, p - ww, p + ww];
+      for (const n of neighbors) {
+        if (n < 0 || n >= mask.length) continue;
+        if (px === 0 && n === p - 1) continue;
+        if (px === ww - 1 && n === p + 1) continue;
+        if (mask[n] === 1 && labels[n] === -1) {
+          labels[n] = start;
+          stack.push(n);
+        }
+      }
+    }
+    const compBox = [wx0 + bx0, wy0 + by0, wx0 + bx1 + 1, wy0 + by1 + 1];
+    const ix1 = Math.max(compBox[0], x1), iy1 = Math.max(compBox[1], y1);
+    const ix2 = Math.min(compBox[2], x2), iy2 = Math.min(compBox[3], y2);
+    const overlap = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+    if (overlap > bestOverlap) { bestOverlap = overlap; bestBox = compBox; }
+  }
+
+  return bestOverlap > 0 ? bestBox : box;
+}
+
+let drag = null; // { wrap: 'rgb'|'thermal', start: [x,y], el: HTMLElement }
+
+function startDrag(wrapEl, img, which, e) {
+  if (which === 'thermal' && !pendingRgbBox) return;
+  if (which === 'rgb' && pendingRgbBox) return;
+  if (!img.complete || !img.naturalWidth) {
+    setLog(`${which} image is still loading, try again in a moment`, true);
+    return;
+  }
+  const start = pointToNatural(e, img);
+  const el = document.createElement('div');
+  el.className = 'box drawing';
+  wrapEl.appendChild(el);
+  drag = { wrap: which, wrapEl, img, start, el };
+  updateDragBox(start);
+}
+
+function updateDragBox(current) {
+  if (!drag) return;
+  const [x1, y1] = [Math.min(drag.start[0], current[0]), Math.min(drag.start[1], current[1])];
+  const [x2, y2] = [Math.max(drag.start[0], current[0]), Math.max(drag.start[1], current[1])];
+  drag.el.style.left = (x1 / drag.img.naturalWidth * 100) + '%';
+  drag.el.style.top = (y1 / drag.img.naturalHeight * 100) + '%';
+  drag.el.style.width = ((x2 - x1) / drag.img.naturalWidth * 100) + '%';
+  drag.el.style.height = ((y2 - y1) / drag.img.naturalHeight * 100) + '%';
+  drag.lastBox = [x1, y1, x2, y2];
+}
+
+function endDrag() {
+  if (!drag) return;
+  const box = drag.lastBox;
+  const which = drag.wrap;
+  drag.el.remove();
+  drag = null;
+
+  if (!box || (box[2] - box[0]) < 3 || (box[3] - box[1]) < 3) {
+    setLog('Box too small, ignored', true);
+    render();
+    return;
+  }
+
+  if (which === 'rgb') {
+    pendingRgbBox = box;
+    setLog('');
+  } else {
+    let thermalBox = box;
+    if (snapToggle.checked) {
+      const snapped = snapBoxToBlob(box);
+      if (snapped !== box) setLog('Snapped to blob extent', false);
+      else setLog('', false);
+      thermalBox = snapped;
+    } else {
+      setLog('');
+    }
+    allPairs.push({ stem: currentStem, rgb: pendingRgbBox, thermal: thermalBox });
+    pendingRgbBox = null;
+  }
+  render();
+}
+
+rgbWrap.addEventListener('mousedown', (e) => { e.preventDefault(); startDrag(rgbWrap, rgbImg, 'rgb', e); });
+thermalWrap.addEventListener('mousedown', (e) => { e.preventDefault(); startDrag(thermalWrap, thermalImg, 'thermal', e); });
+window.addEventListener('mousemove', (e) => {
+  if (!drag) return;
+  updateDragBox(pointToNatural(e, drag.img));
+});
+window.addEventListener('mouseup', () => endDrag());
+
+document.getElementById('undoBtn').addEventListener('click', () => {
+  if (pendingRgbBox) {
+    pendingRgbBox = null;
+  } else {
+    const lastIdx = allPairs.map(p => p.stem).lastIndexOf(currentStem);
+    if (lastIdx !== -1) allPairs.splice(lastIdx, 1);
+  }
+  render();
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  allPairs = allPairs.filter(p => p.stem !== currentStem);
+  pendingRgbBox = null;
+  render();
+});
+
+picker.addEventListener('change', () => selectStem(picker.value));
+
+document.getElementById('prevBtn').addEventListener('click', () => {
+  const idx = candidates.findIndex(c => c.stem === currentStem);
+  if (idx > 0) selectStem(candidates[idx - 1].stem);
+});
+
+document.getElementById('nextBtn').addEventListener('click', () => {
+  const idx = candidates.findIndex(c => c.stem === currentStem);
+  if (idx !== -1 && idx < candidates.length - 1) selectStem(candidates[idx + 1].stem);
+});
+
+document.getElementById('submitBtn').addEventListener('click', async () => {
+  setLog('');
+  submitBtn.disabled = true;
+  try {
+    const res = await fetch('/thermal/calibrate/boxes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pairs: allPairs, preview_stem: currentStem }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Calibration failed');
+
+    const c = candidates.find(x => x.stem === currentStem);
+    showAlignedPreview(currentStem, c.source_image);
+    statusEl.textContent = `Saved calibration from ${data.point_count} box pairs across ${data.image_count} image(s); re-aligned ${data.aligned_count} file(s)`;
+    renderStats(data.boxes);
+  } catch (err) {
+    setLog(err.message, true);
+  } finally {
+    submitBtn.disabled = allPairs.length < 3;
+  }
+});
+
+document.getElementById('opacitySlider').addEventListener('input', (e) => {
+  document.getElementById('overlayAligned').style.opacity = e.target.value / 100;
+});
+
+function pointsMatch(a, b) {
+  return a.stem === b.stem && a.rgb.every((v, i) => v === b.rgb[i]) &&
+         a.thermal.every((v, i) => v === b.thermal[i]);
+}
+
+function renderStats(boxes) {
+  statsBoxes = boxes || [];
+  const statsEl = document.getElementById('stats');
+  const bodyEl = document.getElementById('statsBody');
+  const summaryEl = document.getElementById('statsSummary');
+  if (!statsBoxes.length) {
+    statsEl.style.display = 'none';
+    return;
+  }
+  const inliers = statsBoxes.filter(b => b.inlier);
+  const outliers = statsBoxes.filter(b => !b.inlier);
+  summaryEl.textContent = `${inliers.length} inliers, ${outliers.length} outliers out of ${statsBoxes.length} boxes ` +
+    `(IoU = overlap between the transformed thermal box and the RGB box; higher is better). ` +
+    `Click an image name to jump there and redraw, or ✕ to drop the pair.`;
+  bodyEl.innerHTML = statsBoxes.map((b, i) => `
+    <tr style="${b.inlier ? '' : 'color:#f88;'}">
+      <td><a href="#" class="jumpStem" data-idx="${i}">${b.stem || ''}</a></td>
+      <td>${b.iou.toFixed(3)}</td>
+      <td>${b.inlier ? 'inlier' : 'outlier'}</td>
+      <td><button class="delRow" data-idx="${i}">&times;</button></td>
+    </tr>
+  `).join('');
+  statsEl.style.display = 'block';
+}
+
+document.getElementById('statsBody').addEventListener('click', (e) => {
+  const delBtn = e.target.closest('.delRow');
+  const jumpLink = e.target.closest('.jumpStem');
+
+  if (delBtn) {
+    const idx = parseInt(delBtn.dataset.idx, 10);
+    const b = statsBoxes[idx];
+    if (!b) return;
+    const aidx = allPairs.findIndex(q => pointsMatch(q, b));
+    if (aidx !== -1) allPairs.splice(aidx, 1);
+    statsBoxes.splice(idx, 1);
+    renderStats(statsBoxes);
+    if (b.stem === currentStem) render();
+  } else if (jumpLink) {
+    e.preventDefault();
+    const idx = parseInt(jumpLink.dataset.idx, 10);
+    const b = statsBoxes[idx];
+    if (b && b.stem && candidates.some(c => c.stem === b.stem)) selectStem(b.stem);
+  }
+});
+
+async function loadExistingStats() {
+  try {
+    const res = await fetch('/thermal/calibrate/stats');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.kind === 'boxes') renderStats(data.boxes);
+  } catch (e) { /* no calibration yet, or it's point-based */ }
+}
+
+const autoBtn = document.getElementById('autoBtn');
+const autoStatus = document.getElementById('autoStatus');
+
+autoBtn.addEventListener('click', async () => {
+  autoBtn.disabled = true;
+  autoStatus.textContent = 'Scanning captures, this can take a minute...';
+  autoStatus.style.color = '#7cf';
+  try {
+    const res = await fetch('/thermal/calibrate/auto', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Automatic calibration failed');
+
+    const inliers = data.points.filter(p => p.inlier).length;
+    autoStatus.textContent = `Matched ${data.pairs_matched}/${data.pairs_considered} frames, ` +
+      `${inliers}/${data.point_count} inliers, re-aligned ${data.aligned_count} file(s)`;
+    autoStatus.style.color = '#afa';
+    if (currentStem) {
+      const c = candidates.find(x => x.stem === currentStem);
+      if (c) showAlignedPreview(currentStem, c.source_image);
+    }
+    document.getElementById('stats').style.display = 'none';
+  } catch (err) {
+    autoStatus.textContent = err.message;
+    autoStatus.style.color = '#f88';
+  } finally {
+    autoBtn.disabled = false;
+  }
+});
+
+loadCandidates();
+loadExistingStats();
+</script>
+</body>
+</html>

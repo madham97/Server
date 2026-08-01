@@ -16,15 +16,24 @@ config.py           All constants — paths, thresholds, model defaults
 state.py            Mutable runtime state shared between the watcher and API
 inference.py        YOLO inference wrapper (also runnable as a CLI script)
 trainer.py          Background training thread, status reporting
+thermal_align.py     Thermal-to-RGB homography: calibrate (checkerboard, manual points/boxes,
+                     or automatic background-subtraction), align, corruption detection.
+                     Also runnable as a CLI (`calibrate`, `align`, `auto-calibrate`).
 routers/
-  upload.py         POST /upload — receives images from Pi devices
+  upload.py         POST /upload — receives images from Pi devices; also fires a background
+                     task that aligns any new thermal frame with the saved calibration
   annotate.py       /annotate/* — annotation UI and label persistence
   export.py         /dataset/* — YOLO-format dataset export
   train.py          /train/* — training lifecycle management
   infer.py          /infer/* — ad-hoc inference for testing
+  thermal_view.py   GET /thermal, /thermal/image/{name} — read-only RGB/thermal pair viewer
+  thermal_calibrate.py  /thermal/calibrate/* — calibration UI and fit endpoints
 static/
   annotate.html     Browser annotation UI (single-page)
+  thermal_calibrate.html  Browser calibration UI — draw box pairs or run auto-calibration
 classes.json        Class list ["rat", "human"]
+calibration/
+  homography.json   Saved 3x3 transform (thermal → RGB pixel space) + fit diagnostics
 ```
 
 ---
@@ -39,11 +48,36 @@ Pi device
        ├─ WebP converted to JPEG on receipt
        ├─ If RGBA (thermal-fused frame): split into RGB + alpha
        │    ├─ RGB → JPEG, saved to uploads/<filename> (unchanged path below)
-       │    └─ Alpha → thermal/<stem>_thermal.png + thermal/<stem>_thermal.json
-       │         (thermal/ is a sibling of uploads/, never scanned by the watcher)
+       │    ├─ Alpha → thermal/<stem>_thermal.png + thermal/<stem>_thermal.json
+       │    │    (thermal/ is a sibling of uploads/, never scanned by the watcher)
+       │    └─ Background task: if calibration/homography.json exists, warp the new
+       │         thermal frame with it → thermal/<stem>_thermal_aligned.png
+       │         (runs after the response is sent; no-op if no calibration saved yet)
        ├─ Saved to uploads/<filename>
        └─ Logged to upload_log.txt
 ```
+
+### Thermal calibration and alignment
+
+```
+GET  /thermal/calibrate           Calibration UI: draw RGB/thermal box pairs, or
+                                   POST /thermal/calibrate/auto for background-subtraction
+POST /thermal/calibrate/boxes     Fit affine transform from box pairs (calibrate_from_boxes)
+POST /thermal/calibrate           Fit homography from point pairs (calibrate_from_points)
+POST /thermal/calibrate/auto      Fit affine transform from auto-detected blob centroids
+                                   (auto_calibrate) — rejects the fit outright if under 30%
+                                   of correspondences agree, rather than saving a bad one
+       │
+       ├─ Saves calibration/homography.json (transform + per-point/box fit diagnostics)
+       └─ align_all(force=True): re-warps every thermal/*_thermal.png with the new transform
+```
+
+Every calibration method (checkerboard, manual points, manual boxes, automatic) converges on
+the same `calibration/homography.json`, consumed by `align_thermal`/`align_all` and by the
+`/upload` background alignment task. The manual box method is the one actually exposed in the
+UI's main flow; automatic calibration is available but its correspondence quality depends
+heavily on how well background subtraction can isolate the subject in both spectra — see
+`docs/decisions.md` for what was tried.
 
 ### 2. Background inference
 
@@ -113,7 +147,10 @@ Persistence is file-based (append-only log files), not a database. This was an i
 
 ```
 uploads/        All received images (never deleted automatically)
-thermal/        Thermal PNG + JSON sidecar split from RGBA uploads, keyed by source stem
+thermal/        Thermal PNG + JSON sidecar split from RGBA uploads, keyed by source stem;
+                <stem>_thermal_aligned.png alongside once a calibration exists
+calibration/
+  homography.json  Saved thermal-to-RGB transform + fit diagnostics (see Thermal Calibration)
 processed/      YOLO output per image — processed/<stem>/{<stem>.jpg, labels/<stem>.txt}
 annotated/      Human labels — annotated/<stem>/labels/<stem>.txt
 failed/         Images that exceeded MAX_PROCESS_ATTEMPTS

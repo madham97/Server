@@ -4,12 +4,32 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+import cv2
+import numpy as np
+from fastapi import APIRouter, BackgroundTasks, UploadFile, File, Form, HTTPException
 from PIL import Image as PILImage
 
 from config import THERMAL_DIR, UPLOAD_DIR, UPLOAD_LOG
+from thermal_align import align_thermal, load_calibration
 
 router = APIRouter()
+
+
+def _align_new_capture(thermal_png: Path, stem: str) -> None:
+    """Applies whatever calibration is currently on file to a freshly-arrived thermal
+    frame, so captures get an aligned counterpart as they come in rather than only after
+    the next manual calibration run (which is the only other place align_all/align_thermal
+    get called). Silently does nothing if no calibration has been saved yet."""
+    try:
+        calibration = load_calibration()
+    except FileNotFoundError:
+        return
+    try:
+        homography = np.array(calibration['homography'], dtype=np.float64)
+        aligned = align_thermal(thermal_png, homography, ref_size=calibration.get('ref_size'))
+        cv2.imwrite(str(THERMAL_DIR / f'{stem}_thermal_aligned.png'), aligned)
+    except Exception:
+        logging.exception(f'Failed to align new capture {stem}')
 
 # Thermal-fused frames from the Pi arrive as RGBA WebP: the visible image in RGB, the
 # normalized thermal map in the alpha channel. JPEG can't hold alpha, so we split them —
@@ -22,6 +42,7 @@ router = APIRouter()
 
 @router.post("/upload")
 async def upload(
+    background_tasks: BackgroundTasks,
     image: UploadFile = File(None),
     device_id: str = Form(""),
     mode: str = Form(""),
@@ -61,6 +82,7 @@ async def upload(
                 'thermal_max_c': thermal_max_c,
                 'thermal_avg_c': thermal_avg_c,
             }))
+            background_tasks.add_task(_align_new_capture, THERMAL_DIR / thermal_file, stem)
         else:
             buf = io.BytesIO()
             img.save(buf, format='JPEG', quality=95)

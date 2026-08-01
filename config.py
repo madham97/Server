@@ -8,6 +8,8 @@ PROCESSED_DIR = _BASE / "processed"
 ANNOTATED_DIR = _BASE / "annotated"
 FAILED_DIR = _BASE / "failed"
 THERMAL_DIR = _BASE / "thermal"
+CALIBRATION_DIR = _BASE / "calibration"
+CALIBRATION_FILE = CALIBRATION_DIR / "homography.json"
 
 # Processing configuration
 POLL_INTERVAL = 5

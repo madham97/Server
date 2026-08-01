@@ -174,7 +174,65 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 ---
 
+### Auto-calibration's homography → affine, plus a minimum-inlier-ratio guard
+
+**What happened:** `auto_calibrate` (background-subtraction correspondences, no manual clicking) was fitting a full projective homography (`cv2.findHomography`, RANSAC) through data that was ~92% outliers (9 of 115 correspondences were real inliers). A projective fit through that much noise produced a near-singular perspective row, and `cv2.warpPerspective` divided by near-zero for some pixels — every aligned thermal PNG came out as a radial "starburst," not a merely-misaligned image. The bad fit was saved without complaint; nothing checked inlier ratio before writing `calibration/homography.json`.
+
+**Decision:** `auto_calibrate` now fits an affine transform (`cv2.estimateAffine2D` + RANSAC) instead of a homography, matching what `calibrate_from_boxes`/`_affine_transform` already assumed for this rig (fixed cameras, no real perspective distortion — see the entry below). Affine has no perspective row, so this failure mode is structurally impossible now regardless of input quality. Also added `_MIN_INLIER_RATIO = 0.3`: if fewer than 30% of correspondences agree with the fit, `auto_calibrate` raises instead of saving.
+
+**Why it worked:** The starburst was pure arithmetic blowup, not "worse" misalignment — confirmed by rendering the actual aligned output and by checking the saved homography's bottom row (`[-0.0015, 0.0003, 1]`, i.e. a near-zero denominator lurking in the image). Removing the perspective term removes the mechanism, not just the symptom.
+
+**Trade-off:** The inlier-ratio guard means `auto_calibrate` will now *fail loudly* on marginal data instead of producing something usable-if-imprecise. On this deployment's actual capture data it currently fails outright (~7% agreement even after the blob-detector improvements below) — see "Known Limitations" for why, and use manual box calibration (`/thermal/calibrate`) in the meantime.
+
+---
+
+### Auto-calibration's blob detector: z-score threshold + circularity filter, not Otsu
+
+**What happened:** Investigating the low inlier ratio above, rendering the actual foreground masks `_blob_centroid` was thresholding showed the real problem: on the thermal side, Otsu-on-absolute-diff was scoring 300–850 separate "blobs" per frame — pure per-pixel sensor noise, not a coherent animal shape. On the RGB side, Otsu was picking up static structure (cage bars, lighting/shadow gradients) that differs from the median background but isn't the subject. Otsu splits whatever's in the frame into two halves regardless of whether real foreground is present, so on this noisy data the "largest blob in the plausible size range" was landing on noise most of the time.
+
+**Decision:** Replaced the Otsu-on-raw-diff mask in `_blob_centroid` with a per-pixel z-score threshold (`|frame − median| / (background_std + 3)`, blurred first to suppress sensor noise), plus a circularity filter (`4π·area/perimeter² ≥ 0.25`) to reject elongated non-blob regions (bars, diagonal shadow edges) that a compact animal doesn't produce. `_median_background` became `_background_stats`, returning both the median and the per-pixel std from one pass over the sampled stack. Also corrected `min_area_frac`/`max_area_frac` (0.0015–0.2 → 0.0001–0.05): the old floor was tuned around the old noisy Otsu masks' much-larger spurious regions and was silently rejecting the real (much smaller) animal blob.
+
+**Why it worked:** Verified by inspecting rendered masks before/after — the z-score approach collapsed thermal blob counts from hundreds down to single digits per frame. Auto-calibration's match rate roughly doubled on this dataset (from ~8% to ~19/30 frames finding a plausible blob on both sides).
+
+**Trade-off / known limitation:** Even with this improvement, RGB-side detection still only geometrically agrees with the thermal side on the same real animal ~7% of the time on this deployment's actual footage — several spot-checked RGB detections clustered on the same coordinates across unrelated frames, suggesting the detector is latching onto some static feature (a shadow or edge) rather than tracking the moving subject. There's no trained RGB animal detector available to substitute (`models/` is empty, no `best.pt`) — plain grayscale background-subtraction on the RGB channel may simply not be reliable enough for a small, low-contrast rodent. **Use manual box calibration for now**; if auto-calibration needs to work reliably, the next step would be a trained RGB detector (once training data exists) feeding into `calibrate_from_boxes`, not further tuning of background-subtraction thresholds.
+
+**Update — root cause found on the thermal side, fixed upstream:** the thermal-side "noise" (300–850 spurious blobs/frame, above) wasn't classical spatial sensor noise — `pi-client/thermal/thermal_common.py` in the `Rodent-client` repo normalized each raw 80×62 frame with `cv.normalize(..., NORM_MINMAX)`, stretching to *that frame's own* min/max. So the same real temperature maps to a different 0-255 pixel value depending on whatever else is in view that frame (a shadow, warm bedding), which defeats background subtraction's core assumption of a stable per-pixel baseline — no amount of spatial blur fixes a shifting baseline. Fixed in `Rodent-client` by normalizing against a fixed, deployment-wide °C range (`thermal_norm_min_c`/`thermal_norm_max_c`, default 10–45°C, chosen from ~200 real captures here: frame minimums 17.0–30.2°C, maximums 27.5–39.6°C) instead of each frame's own range. This doesn't by itself fix the RGB-side detection problem described above, but it removes a real confound from the thermal side, and should reduce blob counts on that side further than the z-score fix alone. Worth re-running `auto-calibrate` and re-checking the inlier ratio once devices are updated with the new client.
+
+---
+
+### Calibration preview: `mix-blend-mode: normal`, not `screen`
+
+**What happened:** The calibration UI's aligned-thermal preview used `mix-blend-mode: screen` with an opacity slider. Screen blending always lightens using *both* layers' luminance (`result = 1 − (1−bg)(1−fg)`) — so even at 100% slider position, the RGB backdrop kept showing through, and there was no way to see the pure aligned-thermal image to check pixel-precise alignment.
+
+**Decision:** Changed to `mix-blend-mode: normal`, making the slider a plain crossfade: 0% shows pure RGB, 100% shows pure aligned thermal, anywhere between lets you check edge alignment against the backdrop.
+
+---
+
+### Calibration preview: show "not aligned yet" instead of silently hiding
+
+**What happened:** The preview's `<img>.onerror` handler set the entire preview block to `display: none` on a 404 (no aligned PNG for the current stem), with no message. The image picker defaults to the *newest* capture, and since captures arrive continuously via the background watcher, the newest one very often postdates the last calibration run and has no aligned file yet — so the preview looked broken on nearly every page load, not just occasionally.
+
+**Decision:** Added an explicit `#alignedMissing` message ("Not aligned yet — this capture arrived after the last calibration ran") shown in place of the image on a 404, mirroring the "not aligned yet" placeholder `routers/thermal_view.py`'s gallery already used for the same underlying situation.
+
+---
+
+### New thermal captures aligned immediately on upload, not just at calibration time
+
+**What happened:** Alignment only ever ran inside the three `/thermal/calibrate/*` submit endpoints (`align_all(force=True)`). A capture arriving between calibration runs had no aligned counterpart until the next manual recalibration — even though a perfectly good, already-saved homography existed and could have been applied to it immediately.
+
+**Decision:** `routers/upload.py`'s `/upload` handler now schedules a `BackgroundTasks` job (`_align_new_capture`) right after writing a new thermal PNG + sidecar: it loads `calibration/homography.json` if present and warps the new frame with it, same as `align_thermal` does in `align_all`. Runs in the background so it doesn't add latency to the Pi's upload request; does nothing if no calibration has been saved yet (`load_calibration()` raising `FileNotFoundError` is treated as "not calibrated," not an error).
+
+**Why it worked:** Verified end-to-end — synthesized an RGBA WebP from an existing thermal/RGB pair, POSTed it to `/upload`, and confirmed `<stem>_thermal_aligned.png` appeared within the same request cycle with no calibration re-run.
+
+**Trade-off:** If the calibration later changes, only `align_all` (still triggered by the calibrate endpoints) re-warps *every* existing thermal frame with the new transform — frames aligned under a since-superseded calibration are only corrected by that full re-run, not automatically.
+
+---
+
 ## Known Limitations and Future Work
+
+### Auto-calibration is unreliable on this deployment's footage
+
+`POST /thermal/calibrate/auto` currently rejects its own fit outright (under 30% RANSAC inlier agreement) on this deployment's real captures, even after the z-score/circularity blob-detector improvements — see the entries above. The bottleneck is RGB-side detection: plain grayscale background-subtraction doesn't reliably localize a small, low-contrast rodent, and there's no trained RGB detector yet to substitute (`models/` is empty). Use manual box calibration (`/thermal/calibrate`, "draw boxes" flow) until either the footage/lighting changes enough for background-subtraction to work, or a trained RGB detector exists to feed `calibrate_from_boxes` directly.
 
 ### No deduplication on upload
 

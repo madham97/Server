@@ -76,6 +76,11 @@ Receive an image from a field device.
 - If the uploaded WebP has an alpha channel (thermal-fused frame): saves the alpha channel to
   `thermal/<stem>_thermal.png` and writes `thermal/<stem>_thermal.json` with `source_image`,
   `device_id`, `timestamp`, and the `thermal_min_c`/`max_c`/`avg_c` values.
+- If a thermal frame was split out **and** a calibration is currently saved
+  (`calibration/homography.json`), schedules a background task that warps the new thermal
+  frame with the saved homography and writes `thermal/<stem>_thermal_aligned.png`. Runs after
+  the response is returned (`BackgroundTasks`), so it doesn't add latency to the upload
+  request. Silently does nothing if no calibration has been saved yet.
 
 **Notes:**
 - Thermal-fused frames arrive as RGBA WebP: visible image in RGB, normalized thermal map in
@@ -355,6 +360,66 @@ Browse RGB/thermal capture pairs side by side, newest first. Read-only, no side 
 Serve a raw thermal PNG from `thermal/`. Used by the `/thermal` page; `name` is validated to resolve inside `thermal/` before serving.
 
 **Response:** image file (PNG). **404** if the name doesn't resolve inside `thermal/` or the file doesn't exist.
+
+---
+
+## Thermal Calibration
+
+Computes and applies the thermal-to-RGB homography (`thermal_align.py`, `routers/thermal_calibrate.py`). The result is saved to `calibration/homography.json` and consumed by `align_thermal`/`align_all`, and by the background alignment task on `/upload` (see above).
+
+### `GET /thermal/calibrate`
+Serves the calibration UI (`static/thermal_calibrate.html`) — draw matching boxes around the animal on RGB/thermal pairs, or trigger automatic calibration.
+
+---
+
+### `GET /thermal/calibrate/candidates?limit=200`
+List capture pairs available to calibrate against.
+
+**Response:** JSON array of `{ stem, source_image, timestamp, device_id }`, newest first, excluding any capture whose thermal frame is flagged as a corrupted SPI/CRC read (see `is_thermal_frame_corrupted`) or whose RGB/thermal file is missing.
+
+---
+
+### `POST /thermal/calibrate`
+Fit a homography from manually-clicked point pairs (at least 4).
+
+**Body**
+```json
+{ "pairs": [{ "stem": "...", "rgb": [x, y], "thermal": [x, y] }, ...], "preview_stem": "..." }
+```
+
+**Response:** `{ status, point_count, image_count, aligned_count, preview, points }` — `points` includes per-pair reprojection error (`error_px`) and RANSAC inlier status, worst first.
+
+**Side effects:** saves the calibration and re-aligns every `*_thermal.png` in `thermal/` (`align_all(force=True)`).
+
+---
+
+### `POST /thermal/calibrate/boxes`
+Fit an affine transform from matched bounding boxes (at least 3) — the box's center **and** size both constrain the fit, which tolerates imprecise drawing far better than clicking a single point on a blurry thermal blob. This is what the calibration UI actually uses.
+
+**Body**
+```json
+{ "pairs": [{ "stem": "...", "rgb": [x1,y1,x2,y2], "thermal": [x1,y1,x2,y2] }, ...], "preview_stem": "..." }
+```
+
+**Response:** `{ status, point_count, image_count, aligned_count, preview, boxes }` — `boxes` includes IoU between the transformed thermal box and the RGB box, and inlier status, worst first.
+
+**Side effects:** same as above.
+
+---
+
+### `POST /thermal/calibrate/auto`
+Extracts correspondences automatically via background subtraction — no manual clicking. For every capture, finds the centroid of whatever stands out most from a per-pixel background reference in each spectrum independently, keeps the frame only if both sides found one plausible blob, and fits an affine transform (`cv2.estimateAffine2D` + RANSAC) through the pooled centroids.
+
+**Response:** `{ status, point_count, pairs_considered, pairs_matched, aligned_count, points }`.
+
+**Errors:** `400` if fewer than `min_pairs` (default 8) capture pairs are available, share a common resolution, or produce a usable blob on both sides — or if the RANSAC fit's inlier ratio is below 30% (the fit is rejected outright rather than saved, to avoid silently calibrating from noise).
+
+**Side effects:** same as the point/box endpoints.
+
+---
+
+### `GET /thermal/calibrate/stats`
+Returns the currently saved calibration's summary — method, timestamp, point/box count, inlier count, and mean/max error or IoU. **404** if no calibration has been saved yet.
 
 ---
 

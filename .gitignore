@@ -2,6 +2,7 @@ uploads/
 processed/
 failed/
 thermal/
+calibration/
 dataset/
 annotated/
 runs/
