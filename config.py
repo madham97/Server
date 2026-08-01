@@ -9,7 +9,8 @@ ANNOTATED_DIR = _BASE / "annotated"
 FAILED_DIR = _BASE / "failed"
 THERMAL_DIR = _BASE / "thermal"
 CALIBRATION_DIR = _BASE / "calibration"
-CALIBRATION_FILE = CALIBRATION_DIR / "homography.json"
+CALIBRATION_FILE = CALIBRATION_DIR / "homography.json"  # legacy single-calibration file; migrated into PROFILES_FILE on first read, see thermal_align.load_profiles
+CALIBRATION_PROFILES_FILE = CALIBRATION_DIR / "profiles.json"
 
 # Processing configuration
 POLL_INTERVAL = 5

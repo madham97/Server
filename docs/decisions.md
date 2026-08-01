@@ -220,11 +220,27 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 **What happened:** Alignment only ever ran inside the three `/thermal/calibrate/*` submit endpoints (`align_all(force=True)`). A capture arriving between calibration runs had no aligned counterpart until the next manual recalibration — even though a perfectly good, already-saved homography existed and could have been applied to it immediately.
 
-**Decision:** `routers/upload.py`'s `/upload` handler now schedules a `BackgroundTasks` job (`_align_new_capture`) right after writing a new thermal PNG + sidecar: it loads `calibration/homography.json` if present and warps the new frame with it, same as `align_thermal` does in `align_all`. Runs in the background so it doesn't add latency to the Pi's upload request; does nothing if no calibration has been saved yet (`load_calibration()` raising `FileNotFoundError` is treated as "not calibrated," not an error).
+**Decision:** `routers/upload.py`'s `/upload` handler now schedules a `BackgroundTasks` job (`_align_new_capture`) right after writing a new thermal PNG + sidecar: it looks up whichever calibration covers that capture's own timestamp and warps the new frame with it, same as `align_thermal` does in `align_all`. Runs in the background so it doesn't add latency to the Pi's upload request; does nothing if no calibration covers that timestamp.
 
 **Why it worked:** Verified end-to-end — synthesized an RGBA WebP from an existing thermal/RGB pair, POSTed it to `/upload`, and confirmed `<stem>_thermal_aligned.png` appeared within the same request cycle with no calibration re-run.
 
-**Trade-off:** If the calibration later changes, only `align_all` (still triggered by the calibrate endpoints) re-warps *every* existing thermal frame with the new transform — frames aligned under a since-superseded calibration are only corrected by that full re-run, not automatically.
+**Update — superseded by profile-scoped realignment below:** the original trade-off here was that any recalibration re-warped *every* existing thermal frame with the new transform, whether or not that was correct for old footage. That's no longer true — see "Calibration profiles, scoped by effective time window" below.
+
+---
+
+### Calibration profiles, scoped by effective time window
+
+**What happened:** Calibration was a single `calibration/homography.json` — one transform, used for every capture regardless of when it was taken. That's fine as long as the camera rig never moves, but it doesn't hold once it does: recalibrating after a physical move would fit a new transform for the new geometry and then (via `align_all(force=True)`) blindly re-warp *every* existing thermal frame with it — including frames captured *before* the move, which were correctly aligned under the old geometry and would be silently corrupted by the new one.
+
+**Decision:** Calibration is now a list of **profiles** in `calibration/profiles.json`, each carrying a `[effective_from, effective_until)` window (an ISO timestamp, and either another ISO timestamp or `null` for open-ended) alongside its transform and fit diagnostics. `find_profile_for_timestamp` picks whichever profile's window contains a given capture's own sidecar timestamp — not upload time, not "now," and not necessarily the newest profile. `align_all` and the `/upload` background task both resolve each capture's applicable profile independently through this lookup, so recalibrating after a camera move (create a new profile with `effective_from` = the move) only ever re-aligns the frames actually taken after it; earlier frames keep using the profile that was actually in effect when they were captured. A new/edited profile's window is validated against every other profile's window before saving — two profiles claiming the same moment would be ambiguous, so overlap is rejected outright (400) rather than silently picked between.
+
+On first read, if `profiles.json` doesn't exist yet but the old `homography.json` does, it's migrated into one profile covering all time (epoch to open-ended) — an existing deployment's calibration keeps working unchanged until a real recalibration creates a second, properly time-scoped profile.
+
+Per explicit request, profiles stay editable indefinitely (adding more box pairs to refine an old profile updates it in place, doesn't create a duplicate) and windows are explicit start/end fields rather than always-open-ended-from-now — both chosen over the simpler alternatives for more control, at the cost of needing the overlap validation above to keep the model unambiguous.
+
+**Why it worked:** Verified end-to-end against the real deployment data: created a second profile with a real `effective_from` cutoff, confirmed `align_all(force=True, profile_id=...)` only touched captures at or after that cutoff (checked via file mtimes — a pre-cutoff capture's aligned PNG was untouched) while every post-cutoff capture got the new transform. Also verified the overlap guard rejects a conflicting window with a clear message naming the existing profile it conflicts with, and that editing a profile in place preserves its id while updating its fit and window.
+
+**Trade-off:** A capture whose timestamp falls in a genuine gap between two profiles' windows (or before any profile exists) is left unaligned rather than falling back to some default — treated as "don't align this one" rather than an error, consistent with how a missing calibration was always handled, but it does mean a badly-chosen window boundary can silently leave a batch of captures unaligned. The calibration UI surfaces each profile's window in a list (with edit/delete) specifically so gaps are visible rather than discovered later.
 
 ---
 

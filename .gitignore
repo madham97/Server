@@ -2,7 +2,8 @@ uploads/
 processed/
 failed/
 thermal/
-calibration/
+calibration/*
+!calibration/profiles.json
 dataset/
 annotated/
 runs/

@@ -365,10 +365,14 @@ Serve a raw thermal PNG from `thermal/`. Used by the `/thermal` page; `name` is 
 
 ## Thermal Calibration
 
-Computes and applies the thermal-to-RGB homography (`thermal_align.py`, `routers/thermal_calibrate.py`). The result is saved to `calibration/homography.json` and consumed by `align_thermal`/`align_all`, and by the background alignment task on `/upload` (see above).
+Computes and applies the thermal-to-RGB homography (`thermal_align.py`, `routers/thermal_calibrate.py`). Calibration is stored as a list of **profiles** in `calibration/profiles.json`, not a single transform — each profile carries a `[effective_from, effective_until)` window (an ISO timestamp and either another ISO timestamp or `null` for open-ended), and a capture is aligned using whichever profile's window contains *that capture's own* timestamp (`find_profile_for_timestamp`), not necessarily the newest profile. This is what lets the camera be recalibrated after being physically moved without corrupting the alignment of footage captured before the move — old captures keep using the profile that was actually in effect when they were taken.
+
+On first read, if `calibration/profiles.json` doesn't exist yet but the old single-file `calibration/homography.json` does, it's migrated into one profile covering all time (`effective_from` the Unix epoch, open-ended) — an existing deployment's calibration keeps working unchanged until a real recalibration creates a second, time-scoped profile.
+
+Consumed by `align_thermal`/`align_all` and by the background alignment task on `/upload` (see above), both of which resolve each capture's applicable profile independently.
 
 ### `GET /thermal/calibrate`
-Serves the calibration UI (`static/thermal_calibrate.html`) — draw matching boxes around the animal on RGB/thermal pairs, or trigger automatic calibration.
+Serves the calibration UI (`static/thermal_calibrate.html`) — draw matching boxes around the animal on RGB/thermal pairs, or trigger automatic calibration, against a chosen effective window.
 
 ---
 
@@ -379,47 +383,83 @@ List capture pairs available to calibrate against.
 
 ---
 
+### `GET /thermal/calibrate/profiles`
+List all saved calibration profiles, newest `effective_from` first.
+
+**Response:** JSON array of `{ id, label, effective_from, effective_until, calibrated_at, method, point_count, inlier_count }`.
+
+---
+
+### `DELETE /thermal/calibrate/profiles/{profile_id}`
+Delete a calibration profile. Captures whose timestamp falls in its window are left with whatever aligned file they already have — they become unaligned only once something re-runs `align_all` and finds no profile covers them anymore. **404** if the id doesn't exist.
+
+---
+
 ### `POST /thermal/calibrate`
-Fit a homography from manually-clicked point pairs (at least 4).
+Fit a homography from manually-clicked point pairs (at least 4), saved as a calibration profile.
 
 **Body**
 ```json
-{ "pairs": [{ "stem": "...", "rgb": [x, y], "thermal": [x, y] }, ...], "preview_stem": "..." }
+{
+  "pairs": [{ "stem": "...", "rgb": [x, y], "thermal": [x, y] }, ...],
+  "effective_from": "2026-08-01T00:00:00Z",
+  "effective_until": null,
+  "profile_id": null,
+  "label": "",
+  "preview_stem": "..."
+}
 ```
+`effective_from` is required. `effective_until` defaults to `null` (open-ended). `profile_id`, if given, edits that existing profile in place (new homography, same id, window can also change) instead of creating a new one — validated against every *other* profile's window either way.
 
-**Response:** `{ status, point_count, image_count, aligned_count, preview, points }` — `points` includes per-pair reprojection error (`error_px`) and RANSAC inlier status, worst first.
+**Response:** `{ status, profile_id, point_count, image_count, aligned_count, preview, points }` — `points` includes per-pair reprojection error (`error_px`) and RANSAC inlier status, worst first.
 
-**Side effects:** saves the calibration and re-aligns every `*_thermal.png` in `thermal/` (`align_all(force=True)`).
+**Errors:** `400` if the effective window overlaps another existing profile's window, or the usual point-count/homography-estimation failures.
+
+**Side effects:** saves the profile and re-aligns every capture whose applicable profile is this one (`align_all(force=True, profile_id=...)`) — not every file in `thermal/`, only the ones this profile actually governs.
 
 ---
 
 ### `POST /thermal/calibrate/boxes`
-Fit an affine transform from matched bounding boxes (at least 3) — the box's center **and** size both constrain the fit, which tolerates imprecise drawing far better than clicking a single point on a blurry thermal blob. This is what the calibration UI actually uses.
+Fit an affine transform from matched bounding boxes (at least 3) — the box's center **and** size both constrain the fit, which tolerates imprecise drawing far better than clicking a single point on a blurry thermal blob. This is what the calibration UI actually uses. Same profile semantics as above.
 
 **Body**
 ```json
-{ "pairs": [{ "stem": "...", "rgb": [x1,y1,x2,y2], "thermal": [x1,y1,x2,y2] }, ...], "preview_stem": "..." }
+{
+  "pairs": [{ "stem": "...", "rgb": [x1,y1,x2,y2], "thermal": [x1,y1,x2,y2] }, ...],
+  "effective_from": "2026-08-01T00:00:00Z",
+  "effective_until": null,
+  "profile_id": null,
+  "label": "",
+  "preview_stem": "..."
+}
 ```
 
-**Response:** `{ status, point_count, image_count, aligned_count, preview, boxes }` — `boxes` includes IoU between the transformed thermal box and the RGB box, and inlier status, worst first.
+**Response:** `{ status, profile_id, point_count, image_count, aligned_count, preview, boxes }` — `boxes` includes IoU between the transformed thermal box and the RGB box, and inlier status, worst first.
 
-**Side effects:** same as above.
+**Errors / side effects:** same as `POST /thermal/calibrate`.
 
 ---
 
 ### `POST /thermal/calibrate/auto`
-Extracts correspondences automatically via background subtraction — no manual clicking. For every capture, finds the centroid of whatever stands out most from a per-pixel background reference in each spectrum independently, keeps the frame only if both sides found one plausible blob, and fits an affine transform (`cv2.estimateAffine2D` + RANSAC) through the pooled centroids.
+Extracts correspondences automatically via background subtraction — no manual clicking. For every capture, finds the centroid of whatever stands out most from a per-pixel background reference in each spectrum independently, keeps the frame only if both sides found one plausible blob, and fits an affine transform (`cv2.estimateAffine2D` + RANSAC) through the pooled centroids. Same profile semantics as the point/box endpoints.
 
-**Response:** `{ status, point_count, pairs_considered, pairs_matched, aligned_count, points }`.
+**Body**
+```json
+{ "effective_from": "2026-08-01T00:00:00Z", "effective_until": null, "profile_id": null, "label": "" }
+```
 
-**Errors:** `400` if fewer than `min_pairs` (default 8) capture pairs are available, share a common resolution, or produce a usable blob on both sides — or if the RANSAC fit's inlier ratio is below 30% (the fit is rejected outright rather than saved, to avoid silently calibrating from noise).
+**Response:** `{ status, profile_id, point_count, pairs_considered, pairs_matched, aligned_count, points }`.
+
+**Errors:** `400` if fewer than `min_pairs` (default 8) capture pairs are available, share a common resolution, or produce a usable blob on both sides; if the RANSAC fit's inlier ratio is below 30% (the fit is rejected outright rather than saved, to avoid silently calibrating from noise); or if the effective window overlaps another profile's.
 
 **Side effects:** same as the point/box endpoints.
 
 ---
 
-### `GET /thermal/calibrate/stats`
-Returns the currently saved calibration's summary — method, timestamp, point/box count, inlier count, and mean/max error or IoU. **404** if no calibration has been saved yet.
+### `GET /thermal/calibrate/stats?profile_id=&at=`
+Fit summary for one calibration profile. With neither param, defaults to whichever profile covers right now; `at` (an ISO timestamp) checks a different moment instead; `profile_id` looks up a specific profile directly regardless of its window. Use `GET /thermal/calibrate/profiles` to see all of them.
+
+**Response:** as before, plus `id`, `label`, `effective_from`, `effective_until`. **404** if no profile matches.
 
 ---
 

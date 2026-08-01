@@ -33,7 +33,12 @@ static/
   thermal_calibrate.html  Browser calibration UI — draw box pairs or run auto-calibration
 classes.json        Class list ["rat", "human"]
 calibration/
-  homography.json   Saved 3x3 transform (thermal → RGB pixel space) + fit diagnostics
+  profiles.json     List of calibration profiles — each a 3x3 transform (thermal → RGB pixel
+                     space) plus fit diagnostics and an [effective_from, effective_until)
+                     window. A capture is aligned with whichever profile's window contains
+                     its own timestamp, not necessarily the newest profile.
+  homography.json   Legacy single-calibration file, migrated into profiles.json on first
+                     read if the latter doesn't exist yet (covers all time, open-ended)
 ```
 
 ---
@@ -50,9 +55,10 @@ Pi device
        │    ├─ RGB → JPEG, saved to uploads/<filename> (unchanged path below)
        │    ├─ Alpha → thermal/<stem>_thermal.png + thermal/<stem>_thermal.json
        │    │    (thermal/ is a sibling of uploads/, never scanned by the watcher)
-       │    └─ Background task: if calibration/homography.json exists, warp the new
-       │         thermal frame with it → thermal/<stem>_thermal_aligned.png
-       │         (runs after the response is sent; no-op if no calibration saved yet)
+       │    └─ Background task: look up whichever calibration profile covers *this
+       │         capture's own timestamp* (not "now") and warp the new thermal frame
+       │         with it → thermal/<stem>_thermal_aligned.png (runs after the response
+       │         is sent; no-op if no profile covers that timestamp)
        ├─ Saved to uploads/<filename>
        └─ Logged to upload_log.txt
 ```
@@ -60,21 +66,30 @@ Pi device
 ### Thermal calibration and alignment
 
 ```
-GET  /thermal/calibrate           Calibration UI: draw RGB/thermal box pairs, or
-                                   POST /thermal/calibrate/auto for background-subtraction
+GET  /thermal/calibrate           Calibration UI: draw RGB/thermal box pairs against a chosen
+                                   effective window, or POST /thermal/calibrate/auto
 POST /thermal/calibrate/boxes     Fit affine transform from box pairs (calibrate_from_boxes)
 POST /thermal/calibrate           Fit homography from point pairs (calibrate_from_points)
 POST /thermal/calibrate/auto      Fit affine transform from auto-detected blob centroids
                                    (auto_calibrate) — rejects the fit outright if under 30%
                                    of correspondences agree, rather than saving a bad one
        │
-       ├─ Saves calibration/homography.json (transform + per-point/box fit diagnostics)
-       └─ align_all(force=True): re-warps every thermal/*_thermal.png with the new transform
+       ├─ Validates [effective_from, effective_until) doesn't overlap any other saved
+       │  profile's window (400 if it does)
+       ├─ Saves as a new profile, or edits one in place if profile_id is given, in
+       │  calibration/profiles.json (transform + per-point/box fit diagnostics + window)
+       └─ align_all(force=True, profile_id=<the saved profile>): re-warps only the
+          captures whose own timestamp falls in *this* profile's window — not every
+          file in thermal/, and not captures another profile already governs
 ```
 
 Every calibration method (checkerboard, manual points, manual boxes, automatic) converges on
-the same `calibration/homography.json`, consumed by `align_thermal`/`align_all` and by the
-`/upload` background alignment task. The manual box method is the one actually exposed in the
+the same profile-list model in `calibration/profiles.json`, consumed by `align_thermal`/
+`align_all` and by the `/upload` background alignment task — both resolve each capture's
+applicable profile independently via `find_profile_for_timestamp`, using that capture's own
+timestamp. This is what lets a camera move mid-deployment: a new profile with a window
+starting at the move re-aligns only the frames taken after it, leaving earlier frames on the
+profile that correctly aligned them. The manual box method is the one actually exposed in the
 UI's main flow; automatic calibration is available but its correspondence quality depends
 heavily on how well background subtraction can isolate the subject in both spectra — see
 `docs/decisions.md` for what was tried.

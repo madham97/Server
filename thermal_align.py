@@ -1,19 +1,144 @@
 import json
 import logging
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from config import CALIBRATION_DIR, CALIBRATION_FILE, THERMAL_DIR, UPLOAD_DIR
+from config import CALIBRATION_DIR, CALIBRATION_FILE, CALIBRATION_PROFILES_FILE, THERMAL_DIR, UPLOAD_DIR
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 _CORNER_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+
+
+def _parse_ts(ts: str) -> datetime:
+    """Parses a 'YYYY-MM-DDTHH:MM:SSZ'-style timestamp (the format used throughout this
+    codebase — sidecar JSON, calibrated_at, effective_from/until) into an aware datetime."""
+    return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+
+
+def load_profiles() -> list[dict]:
+    """All saved calibration profiles, sorted by effective_from.
+
+    A profile is a homography/affine transform plus the time window it applies to
+    (`effective_from`, and `effective_until` or None for open-ended) — see
+    `find_profile_for_timestamp`. On first call, if no profiles file exists yet but the old
+    single-calibration CALIBRATION_FILE does, migrates it into one profile covering all time
+    (effective_from the Unix epoch, open-ended), so an existing deployment's calibration
+    keeps working unchanged until a real recalibration (e.g. after moving the camera)
+    creates a second, properly time-scoped profile."""
+    if not CALIBRATION_PROFILES_FILE.exists():
+        if CALIBRATION_FILE.exists():
+            legacy = json.loads(CALIBRATION_FILE.read_text())
+            profile = {
+                'id': 'legacy',
+                'label': 'Migrated from single-file calibration',
+                'effective_from': '1970-01-01T00:00:00Z',
+                'effective_until': None,
+                **legacy,
+            }
+            save_profiles([profile])
+            logging.info(f'Migrated legacy {CALIBRATION_FILE} into a single all-time calibration profile')
+            return [profile]
+        return []
+    return json.loads(CALIBRATION_PROFILES_FILE.read_text())
+
+
+def save_profiles(profiles: list[dict]) -> None:
+    CALIBRATION_DIR.mkdir(exist_ok=True)
+    CALIBRATION_PROFILES_FILE.write_text(json.dumps(profiles, indent=2))
+
+
+def _windows_overlap(a_from: datetime, a_until: datetime | None,
+                      b_from: datetime, b_until: datetime | None) -> bool:
+    a_until = a_until or datetime.max.replace(tzinfo=timezone.utc)
+    b_until = b_until or datetime.max.replace(tzinfo=timezone.utc)
+    return a_from < b_until and b_from < a_until
+
+
+def _validate_window(profiles: list[dict], effective_from: str, effective_until: str | None,
+                      exclude_id: str | None = None) -> None:
+    """Raises ValueError if [effective_from, effective_until) would overlap any other saved
+    profile's window — two profiles both claiming the same moment is ambiguous, since a
+    capture at that moment couldn't tell which one to use."""
+    new_from = _parse_ts(effective_from)
+    new_until = _parse_ts(effective_until) if effective_until else None
+    if new_until and new_until <= new_from:
+        raise ValueError('effective_until must be after effective_from')
+
+    for p in profiles:
+        if p['id'] == exclude_id:
+            continue
+        p_from = _parse_ts(p['effective_from'])
+        p_until = _parse_ts(p['effective_until']) if p.get('effective_until') else None
+        if _windows_overlap(new_from, new_until, p_from, p_until):
+            raise ValueError(
+                f"Effective window {effective_from} .. {effective_until or 'open-ended'} overlaps "
+                f"existing profile {p['id']!r} ({p['effective_from']} .. {p.get('effective_until') or 'open-ended'})"
+            )
+
+
+def find_profile_for_timestamp(timestamp: str, profiles: list[dict] | None = None) -> dict | None:
+    """Which saved calibration profile applies to a capture at this ISO timestamp — the one
+    whose [effective_from, effective_until) window contains it. Returns None if no profile
+    covers it (nothing calibrated yet, or a genuine gap between two profiles' windows) —
+    callers should treat that as 'don't align this one', not an error."""
+    if profiles is None:
+        profiles = load_profiles()
+    ts = _parse_ts(timestamp)
+    for p in profiles:
+        p_from = _parse_ts(p['effective_from'])
+        p_until = _parse_ts(p['effective_until']) if p.get('effective_until') else None
+        if p_from <= ts and (p_until is None or ts < p_until):
+            return p
+    return None
+
+
+def _upsert_profile(new_fields: dict, effective_from: str, effective_until: str | None,
+                     profile_id: str | None = None, label: str = "") -> dict:
+    """Creates a new calibration profile, or replaces an existing one in place (by id) —
+    the "always editable" model: refitting an old profile with more box/point pairs updates
+    it in place rather than creating a duplicate, but its effective window can also move
+    (still validated against every *other* profile). Either way the window is validated
+    against every other saved profile first. Returns the saved profile."""
+    profiles = load_profiles()
+    _validate_window(profiles, effective_from, effective_until, exclude_id=profile_id)
+
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    if profile_id:
+        existing = next((p for p in profiles if p['id'] == profile_id), None)
+        if existing is None:
+            raise ValueError(f'No existing calibration profile with id {profile_id!r}')
+        profile = {
+            **existing, **new_fields,
+            'effective_from': effective_from,
+            'effective_until': effective_until,
+            'calibrated_at': now,
+            'label': label or existing.get('label', ''),
+        }
+        profiles = [profile if p['id'] == profile_id else p for p in profiles]
+    else:
+        profile = {
+            'id': f"prof_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:6]}",
+            'label': label,
+            'effective_from': effective_from,
+            'effective_until': effective_until,
+            'calibrated_at': now,
+            **new_fields,
+        }
+        profiles.append(profile)
+
+    profiles.sort(key=lambda p: p['effective_from'])
+    save_profiles(profiles)
+    logging.info(f"Saved calibration profile {profile['id']} "
+                 f"({effective_from} .. {effective_until or 'open-ended'})")
+    return profile
 
 
 def _find_corners(image_path: str, pattern_size: tuple[int, int]) -> np.ndarray:
@@ -35,8 +160,11 @@ def _find_corners(image_path: str, pattern_size: tuple[int, int]) -> np.ndarray:
     return corners.reshape(-1, 2)
 
 
-def _save_calibration(homography: np.ndarray, thermal_pts: np.ndarray, rgb_pts: np.ndarray,
-                       mask: np.ndarray | None, extra: dict, stems: list[str] | None = None) -> list[dict]:
+def _score_points(homography: np.ndarray, thermal_pts: np.ndarray, rgb_pts: np.ndarray,
+                   mask: np.ndarray | None, stems: list[str] | None = None) -> list[dict]:
+    """Per-point reprojection error and RANSAC inlier/outlier status — the diagnostics
+    attached to a point-based calibration profile. Pure function; does not save anything
+    (see `_upsert_profile` for that)."""
     inlier_flags = mask.ravel().astype(bool).tolist() if mask is not None else [True] * len(thermal_pts)
 
     ones = np.ones((len(thermal_pts), 1))
@@ -54,17 +182,6 @@ def _save_calibration(homography: np.ndarray, thermal_pts: np.ndarray, rgb_pts: 
 
     inliers = sum(inlier_flags)
     logging.info(f'Homography solved from {len(thermal_pts)} point pairs ({inliers} inliers)')
-
-    CALIBRATION_DIR.mkdir(exist_ok=True)
-    CALIBRATION_FILE.write_text(json.dumps({
-        'homography': homography.tolist(),
-        'point_count': len(thermal_pts),
-        'inlier_count': inliers,
-        'points': points,
-        'calibrated_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        **extra,
-    }, indent=2))
-    logging.info(f'Saved calibration to {CALIBRATION_FILE}')
     return points
 
 
@@ -118,11 +235,13 @@ def _normalize_coords_to_reference(entries: list[list[float]],
     return normalized, (ref_w, ref_h)
 
 
-def calibrate(rgb_calib_path: str, thermal_calib_path: str,
-              pattern_size: tuple[int, int] = (9, 6)) -> np.ndarray:
+def calibrate(rgb_calib_path: str, thermal_calib_path: str, effective_from: str,
+              effective_until: str | None = None, pattern_size: tuple[int, int] = (9, 6),
+              profile_id: str | None = None, label: str = "") -> np.ndarray:
     """Compute the homography that warps thermal-frame pixels into RGB-frame pixels,
-    from a single photo pair of a checkerboard visible in both spectra. Saves the
-    result to CALIBRATION_FILE and returns the 3x3 matrix."""
+    from a single photo pair of a checkerboard visible in both spectra. Saves the result as
+    a calibration profile effective over [effective_from, effective_until) and returns the
+    3x3 matrix — see `_upsert_profile`."""
     rgb_pts = _find_corners(rgb_calib_path, pattern_size)
     thermal_pts = _find_corners(thermal_calib_path, pattern_size)
 
@@ -130,21 +249,31 @@ def calibrate(rgb_calib_path: str, thermal_calib_path: str,
     if homography is None:
         raise RuntimeError('Homography estimation failed')
 
-    _save_calibration(homography, thermal_pts, rgb_pts, mask, {
+    points = _score_points(homography, thermal_pts, rgb_pts, mask)
+    _upsert_profile({
+        'homography': homography.tolist(),
+        'point_count': len(thermal_pts),
+        'inlier_count': sum(1 for p in points if p['inlier']),
+        'points': points,
         'method': 'checkerboard',
         'pattern_size': list(pattern_size),
         'rgb_calib_image': str(rgb_calib_path),
         'thermal_calib_image': str(thermal_calib_path),
-    })
+    }, effective_from, effective_until, profile_id=profile_id, label=label)
     return homography
 
 
 def calibrate_from_points(thermal_points: list[list[float]], rgb_points: list[list[float]],
-                           stems: list[str] | None = None, source_stem: str = "") -> tuple[np.ndarray, list[dict]]:
+                           effective_from: str, effective_until: str | None = None,
+                           stems: list[str] | None = None, source_stem: str = "",
+                           profile_id: str | None = None, label: str = "") -> tuple[np.ndarray, list[dict], str]:
     """Compute the thermal-to-RGB homography from manually picked corresponding points
     on an existing (non-checkerboard) capture pair. Needs at least 4 point pairs; more,
-    spread across the frame, gives a more reliable fit. Saves to CALIBRATION_FILE, including
-    per-point reprojection error and RANSAC inlier/outlier status."""
+    spread across the frame, gives a more reliable fit. Saves as a calibration profile
+    effective over [effective_from, effective_until), including per-point reprojection
+    error and RANSAC inlier/outlier status — see `_upsert_profile`. Returns
+    (homography, points, profile_id) — the last is the new or updated profile's id, for
+    scoping a subsequent `align_all(profile_id=...)` to just the frames it governs."""
     if len(thermal_points) != len(rgb_points):
         raise ValueError('thermal_points and rgb_points must be the same length')
     if len(thermal_points) < 4:
@@ -163,12 +292,17 @@ def calibrate_from_points(thermal_points: list[list[float]], rgb_points: list[li
     if homography is None:
         raise RuntimeError('Homography estimation failed')
 
-    points = _save_calibration(homography, thermal_pts, rgb_pts, mask, {
+    points = _score_points(homography, thermal_pts, rgb_pts, mask, stems=stems)
+    profile = _upsert_profile({
+        'homography': homography.tolist(),
+        'point_count': len(thermal_pts),
+        'inlier_count': sum(1 for p in points if p['inlier']),
+        'points': points,
         'method': 'manual_points',
         'source_stem': source_stem,
         'ref_size': list(ref_size) if ref_size else None,
-    }, stems=stems)
-    return homography, points
+    }, effective_from, effective_until, profile_id=profile_id, label=label)
+    return homography, points, profile['id']
 
 
 def _similarity_transform(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
@@ -243,8 +377,10 @@ def _transform_box(box: list[float], H: np.ndarray) -> list[float]:
 
 
 def calibrate_from_boxes(thermal_boxes: list[list[float]], rgb_boxes: list[list[float]],
+                          effective_from: str, effective_until: str | None = None,
                           stems: list[str] | None = None, source_stem: str = "",
-                          inlier_iou: float = 0.15) -> tuple[np.ndarray, list[dict]]:
+                          inlier_iou: float = 0.15, profile_id: str | None = None,
+                          label: str = "") -> tuple[np.ndarray, list[dict], str]:
     """Fits an affine transform from matched bounding boxes (one drawn around the animal
     in each spectrum per capture) instead of exact point clicks. A box's center and size
     both constrain the fit, which tolerates imprecise drawing far better than single-pixel
@@ -296,32 +432,32 @@ def calibrate_from_boxes(thermal_boxes: list[list[float]], rgb_boxes: list[list[
     logging.info(f'Affine transform solved from {len(thermal_boxes)} box pairs '
                  f'({inliers} above {inlier_iou} IoU)')
 
-    CALIBRATION_DIR.mkdir(exist_ok=True)
-    CALIBRATION_FILE.write_text(json.dumps({
+    profile = _upsert_profile({
         'homography': homography.tolist(),
         'point_count': len(thermal_boxes),
         'inlier_count': inliers,
         'boxes': boxes_detail,
-        'calibrated_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'method': 'manual_boxes',
         'source_stem': source_stem,
         'ref_size': list(ref_size) if ref_size else None,
-    }, indent=2))
-    logging.info(f'Saved calibration to {CALIBRATION_FILE}')
+    }, effective_from, effective_until, profile_id=profile_id, label=label)
 
-    return homography, boxes_detail
-
-
-def load_calibration() -> dict:
-    if not CALIBRATION_FILE.exists():
-        raise FileNotFoundError(
-            f'No calibration found at {CALIBRATION_FILE}. Run `python thermal_align.py calibrate ...` first.'
-        )
-    return json.loads(CALIBRATION_FILE.read_text())
+    return homography, boxes_detail, profile['id']
 
 
-def load_homography() -> np.ndarray:
-    return np.array(load_calibration()['homography'], dtype=np.float64)
+def _capture_timestamp(stem: str) -> str | None:
+    """The capture-time ISO timestamp recorded in a thermal sidecar JSON, or None if the
+    sidecar is missing/unreadable. This is what a capture's applicable calibration profile
+    is looked up by — not upload time or file mtime, since a batch re-upload or a delayed
+    sync would otherwise misattribute captures to whichever profile happens to be current
+    at upload time rather than the one that was actually in effect when the photo was taken."""
+    sidecar = THERMAL_DIR / f'{stem}_thermal.json'
+    if not sidecar.exists():
+        return None
+    try:
+        return json.loads(sidecar.read_text()).get('timestamp') or None
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def align_thermal(thermal_png_path: str, homography: np.ndarray,
@@ -353,22 +489,43 @@ def align_thermal(thermal_png_path: str, homography: np.ndarray,
     return cv2.warpPerspective(img, H, (w, h))
 
 
-def align_all(thermal_dir: Path = THERMAL_DIR, force: bool = False) -> int:
-    """Align every *_thermal.png in thermal_dir that doesn't already have an
-    aligned counterpart, writing *_thermal_aligned.png alongside the original.
+def align_all(thermal_dir: Path = THERMAL_DIR, force: bool = False,
+               profile_id: str | None = None) -> int:
+    """Align every *_thermal.png in thermal_dir that doesn't already have an aligned
+    counterpart, writing *_thermal_aligned.png alongside the original. Each capture is
+    aligned with whichever calibration profile's [effective_from, effective_until) window
+    contains *its own* capture timestamp — not necessarily the newest profile — so a camera
+    move that starts a new profile only ever affects the frames actually taken after the
+    move; frames from before it keep using the old profile they were correctly aligned
+    with. A capture with no covering profile (a gap, or nothing calibrated yet for that
+    period) is left unaligned.
+
+    If `profile_id` is given, only re-aligns captures whose applicable profile is that one
+    — used after editing an existing profile, so the refit only touches the frames it
+    actually governs rather than every frame on disk regardless of which profile applies to
+    it. Captures whose applicable profile is a *different* one are left untouched either way.
+
     Returns the number of files aligned."""
-    calibration = load_calibration()
-    homography = np.array(calibration['homography'], dtype=np.float64)
-    ref_size = calibration.get('ref_size')
+    profiles = load_profiles()
     count = 0
     for src in sorted(thermal_dir.glob('*_thermal.png')):
         stem = src.name.removesuffix('_thermal.png')
+        timestamp = _capture_timestamp(stem)
+        if timestamp is None:
+            continue
+        profile = find_profile_for_timestamp(timestamp, profiles=profiles)
+        if profile is None:
+            continue
+        if profile_id is not None and profile['id'] != profile_id:
+            continue
+
         out_path = thermal_dir / f'{stem}_thermal_aligned.png'
         if out_path.exists() and not force:
             continue
-        aligned = align_thermal(src, homography, ref_size=ref_size)
+        homography = np.array(profile['homography'], dtype=np.float64)
+        aligned = align_thermal(src, homography, ref_size=profile.get('ref_size'))
         cv2.imwrite(str(out_path), aligned)
-        logging.info(f'Aligned {src.name} -> {out_path.name}')
+        logging.info(f'Aligned {src.name} -> {out_path.name} (profile {profile["id"]})')
         count += 1
     return count
 
@@ -499,8 +656,9 @@ def _blob_centroid(gray: np.ndarray, background: np.ndarray, background_std: np.
 _MIN_INLIER_RATIO = 0.3
 
 
-def auto_calibrate(min_pairs: int = 8, sample_size: int = 80,
-                    min_area_frac: float = 0.0001, max_area_frac: float = 0.05) -> tuple[np.ndarray, list[dict], dict]:
+def auto_calibrate(effective_from: str, effective_until: str | None = None, min_pairs: int = 8,
+                    sample_size: int = 80, min_area_frac: float = 0.0001, max_area_frac: float = 0.05,
+                    profile_id: str | None = None, label: str = "") -> tuple[np.ndarray, list[dict], dict, str]:
     """Automatically extracts thermal<->RGB correspondences with no manual clicking:
     for every capture, finds the centroid of whatever stands out most from a median
     background in each spectrum independently, and keeps the frame only if both sides
@@ -567,12 +725,17 @@ def auto_calibrate(min_pairs: int = 8, sample_size: int = 80,
         )
 
     ref_h, ref_w = thermal_gray.shape[:2]
-    points = _save_calibration(homography, thermal_pts, rgb_pts, mask, {
+    points = _score_points(homography, thermal_pts, rgb_pts, mask, stems=stems)
+    profile = _upsert_profile({
+        'homography': homography.tolist(),
+        'point_count': len(thermal_pts),
+        'inlier_count': sum(1 for p in points if p['inlier']),
+        'points': points,
         'method': 'auto_background_subtraction',
         'source_stem': f'auto:{len(stems)}_frames',
         'ref_size': [ref_w, ref_h],
-    }, stems=stems)
-    return homography, points, diagnostics
+    }, effective_from, effective_until, profile_id=profile_id, label=label)
+    return homography, points, diagnostics, profile['id']
 
 
 def main():
@@ -585,14 +748,29 @@ def main():
     p_cal.add_argument('rgb_image', help='Path to the RGB photo of the checkerboard')
     p_cal.add_argument('thermal_image', help='Path to the thermal photo of the checkerboard')
     p_cal.add_argument('--pattern-size', default='9x6', help='Inner corners WxH, e.g. 9x6')
+    p_cal.add_argument('--effective-from', required=True,
+                        help='ISO timestamp (e.g. 2026-08-01T00:00:00Z) this calibration profile applies from')
+    p_cal.add_argument('--effective-until', default=None,
+                        help='ISO timestamp this profile applies until (default: open-ended)')
+    p_cal.add_argument('--profile-id', default=None, help='Edit an existing profile in place instead of creating a new one')
+    p_cal.add_argument('--label', default='', help='Optional human-readable label for this profile')
 
-    p_align = sub.add_parser('align', help='Apply the saved homography to thermal captures')
+    p_align = sub.add_parser('align', help="Apply each capture's applicable calibration profile")
     p_align.add_argument('path', nargs='?', default=str(THERMAL_DIR),
                           help='A *_thermal.png file, or a directory to batch-process (default: thermal/)')
     p_align.add_argument('--force', action='store_true', help='Re-align even if an aligned file already exists')
+    p_align.add_argument('--profile-id', default=None,
+                          help='Only re-align captures whose applicable profile is this one')
+
+    p_profiles = sub.add_parser('profiles', help='List saved calibration profiles')
 
     p_auto = sub.add_parser('auto-calibrate',
                              help='Extract correspondences automatically via background subtraction, no manual clicking')
+    p_auto.add_argument('--effective-from', required=True,
+                         help='ISO timestamp this calibration profile applies from')
+    p_auto.add_argument('--effective-until', default=None, help='ISO timestamp this profile applies until (default: open-ended)')
+    p_auto.add_argument('--profile-id', default=None, help='Edit an existing profile in place instead of creating a new one')
+    p_auto.add_argument('--label', default='', help='Optional human-readable label for this profile')
     p_auto.add_argument('--min-pairs', type=int, default=8)
     p_auto.add_argument('--sample-size', type=int, default=80, help='Frames sampled to build the background reference')
     p_auto.add_argument('--min-area-frac', type=float, default=0.0001, help='Min blob size, as a fraction of frame area')
@@ -602,16 +780,26 @@ def main():
 
     if args.command == 'calibrate':
         w, h = (int(x) for x in args.pattern_size.lower().split('x'))
-        calibrate(args.rgb_image, args.thermal_image, pattern_size=(w, h))
+        calibrate(args.rgb_image, args.thermal_image, args.effective_from,
+                  effective_until=args.effective_until, pattern_size=(w, h),
+                  profile_id=args.profile_id, label=args.label)
 
     elif args.command == 'auto-calibrate':
-        homography, points, diagnostics = auto_calibrate(
+        homography, points, diagnostics, profile_id = auto_calibrate(
+            args.effective_from, effective_until=args.effective_until,
             min_pairs=args.min_pairs, sample_size=args.sample_size,
             min_area_frac=args.min_area_frac, max_area_frac=args.max_area_frac,
+            profile_id=args.profile_id, label=args.label,
         )
         inliers = sum(1 for p in points if p['inlier'])
         logging.info(f"{diagnostics['pairs_matched']}/{diagnostics['pairs_considered']} frames matched, "
                      f"{inliers}/{len(points)} inliers")
+
+    elif args.command == 'profiles':
+        for p in load_profiles():
+            logging.info(f"{p['id']}: {p['effective_from']} .. {p.get('effective_until') or 'open-ended'} "
+                         f"[{p.get('method')}] {p.get('inlier_count')}/{p.get('point_count')} inliers"
+                         f"{' — ' + p['label'] if p.get('label') else ''}")
 
     elif args.command == 'align':
         path = Path(args.path)
@@ -619,16 +807,19 @@ def main():
             raise SystemExit(f'Path not found: {path}')
 
         if path.is_dir():
-            count = align_all(path, force=args.force)
+            count = align_all(path, force=args.force, profile_id=args.profile_id)
             logging.info(f'Aligned {count} file(s)')
         else:
-            calibration = load_calibration()
-            homography = np.array(calibration['homography'], dtype=np.float64)
             stem = path.name.removesuffix('_thermal.png')
+            timestamp = _capture_timestamp(stem)
+            profile = find_profile_for_timestamp(timestamp) if timestamp else None
+            if profile is None:
+                raise SystemExit(f'No calibration profile covers {stem} (capture timestamp: {timestamp})')
+            homography = np.array(profile['homography'], dtype=np.float64)
             out_path = path.parent / f'{stem}_thermal_aligned.png'
-            aligned = align_thermal(path, homography, ref_size=calibration.get('ref_size'))
+            aligned = align_thermal(path, homography, ref_size=profile.get('ref_size'))
             cv2.imwrite(str(out_path), aligned)
-            logging.info(f'Aligned -> {out_path}')
+            logging.info(f'Aligned -> {out_path} (profile {profile["id"]})')
 
 
 if __name__ == '__main__':

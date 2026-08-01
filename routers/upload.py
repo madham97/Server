@@ -10,23 +10,25 @@ from fastapi import APIRouter, BackgroundTasks, UploadFile, File, Form, HTTPExce
 from PIL import Image as PILImage
 
 from config import THERMAL_DIR, UPLOAD_DIR, UPLOAD_LOG
-from thermal_align import align_thermal, load_calibration
+from thermal_align import align_thermal, find_profile_for_timestamp
 
 router = APIRouter()
 
 
-def _align_new_capture(thermal_png: Path, stem: str) -> None:
-    """Applies whatever calibration is currently on file to a freshly-arrived thermal
-    frame, so captures get an aligned counterpart as they come in rather than only after
-    the next manual calibration run (which is the only other place align_all/align_thermal
-    get called). Silently does nothing if no calibration has been saved yet."""
+def _align_new_capture(thermal_png: Path, stem: str, timestamp: str) -> None:
+    """Applies whichever calibration profile covers this capture's own timestamp to a
+    freshly-arrived thermal frame, so captures get an aligned counterpart as they come in
+    rather than only after the next manual calibration run (which is the only other place
+    align_all/align_thermal get called). Uses the capture's own timestamp — not "now" —
+    so this stays correct even for a delayed/batched upload of an older capture: it gets
+    the profile that was actually in effect when the photo was taken, not whatever profile
+    happens to be current at upload time. Silently does nothing if no profile covers it."""
     try:
-        calibration = load_calibration()
-    except FileNotFoundError:
-        return
-    try:
-        homography = np.array(calibration['homography'], dtype=np.float64)
-        aligned = align_thermal(thermal_png, homography, ref_size=calibration.get('ref_size'))
+        profile = find_profile_for_timestamp(timestamp) if timestamp else None
+        if profile is None:
+            return
+        homography = np.array(profile['homography'], dtype=np.float64)
+        aligned = align_thermal(thermal_png, homography, ref_size=profile.get('ref_size'))
         cv2.imwrite(str(THERMAL_DIR / f'{stem}_thermal_aligned.png'), aligned)
     except Exception:
         logging.exception(f'Failed to align new capture {stem}')
@@ -82,7 +84,7 @@ async def upload(
                 'thermal_max_c': thermal_max_c,
                 'thermal_avg_c': thermal_avg_c,
             }))
-            background_tasks.add_task(_align_new_capture, THERMAL_DIR / thermal_file, stem)
+            background_tasks.add_task(_align_new_capture, THERMAL_DIR / thermal_file, stem, timestamp)
         else:
             buf = io.BytesIO()
             img.save(buf, format='JPEG', quality=95)

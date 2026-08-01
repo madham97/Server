@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -9,7 +10,8 @@ from pydantic import BaseModel
 
 from config import THERMAL_DIR, UPLOAD_DIR
 from thermal_align import (align_all, auto_calibrate, calibrate_from_boxes, calibrate_from_points,
-                            is_thermal_frame_corrupted, load_calibration)
+                            find_profile_for_timestamp, is_thermal_frame_corrupted, load_profiles,
+                            save_profiles)
 
 router = APIRouter(prefix="/thermal/calibrate")
 
@@ -47,6 +49,35 @@ async def candidates(limit: int = 200):
     return items
 
 
+@router.get("/profiles")
+async def list_profiles():
+    """All saved calibration profiles, newest effective_from first — each with its
+    [effective_from, effective_until) window, method, and fit summary. A capture is aligned
+    using whichever profile's window contains its own timestamp (see
+    thermal_align.find_profile_for_timestamp), not necessarily the most recent profile."""
+    profiles = sorted(load_profiles(), key=lambda p: p["effective_from"], reverse=True)
+    return [{
+        "id": p["id"],
+        "label": p.get("label", ""),
+        "effective_from": p["effective_from"],
+        "effective_until": p.get("effective_until"),
+        "calibrated_at": p.get("calibrated_at"),
+        "method": p.get("method"),
+        "point_count": p.get("point_count"),
+        "inlier_count": p.get("inlier_count"),
+    } for p in profiles]
+
+
+@router.delete("/profiles/{profile_id}")
+async def delete_profile(profile_id: str):
+    profiles = load_profiles()
+    remaining = [p for p in profiles if p["id"] != profile_id]
+    if len(remaining) == len(profiles):
+        raise HTTPException(status_code=404, detail=f"No profile with id {profile_id!r}")
+    save_profiles(remaining)
+    return {"status": "ok", "deleted": profile_id}
+
+
 class Pair(BaseModel):
     stem: str
     rgb: list[float]
@@ -55,6 +86,10 @@ class Pair(BaseModel):
 
 class CalibrationSubmission(BaseModel):
     pairs: list[Pair]
+    effective_from: str
+    effective_until: str | None = None
+    profile_id: str | None = None
+    label: str = ""
     preview_stem: str | None = None
 
 
@@ -69,14 +104,16 @@ async def submit_calibration(body: CalibrationSubmission):
     stems = sorted(set(point_stems))
 
     try:
-        _, points = calibrate_from_points(thermal_points, rgb_points, stems=point_stems,
-                                           source_stem=",".join(stems))
+        _, points, profile_id = calibrate_from_points(
+            thermal_points, rgb_points, body.effective_from, effective_until=body.effective_until,
+            stems=point_stems, source_stem=",".join(stems), profile_id=body.profile_id, label=body.label,
+        )
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    aligned_count = align_all(force=True)
+    aligned_count = align_all(force=True, profile_id=profile_id)
     logging.info(
-        f"Calibrated from {len(body.pairs)} points across {len(stems)} image(s); "
+        f"Calibrated profile {profile_id} from {len(body.pairs)} points across {len(stems)} image(s); "
         f"re-aligned {aligned_count} file(s)"
     )
 
@@ -87,6 +124,7 @@ async def submit_calibration(body: CalibrationSubmission):
 
     return {
         "status": "ok",
+        "profile_id": profile_id,
         "point_count": len(body.pairs),
         "image_count": len(stems),
         "aligned_count": aligned_count,
@@ -103,6 +141,10 @@ class BoxPair(BaseModel):
 
 class BoxCalibrationSubmission(BaseModel):
     pairs: list[BoxPair]
+    effective_from: str
+    effective_until: str | None = None
+    profile_id: str | None = None
+    label: str = ""
     preview_stem: str | None = None
 
 
@@ -117,14 +159,16 @@ async def submit_box_calibration(body: BoxCalibrationSubmission):
     stems = sorted(set(point_stems))
 
     try:
-        _, boxes = calibrate_from_boxes(thermal_boxes, rgb_boxes, stems=point_stems,
-                                         source_stem=",".join(stems))
+        _, boxes, profile_id = calibrate_from_boxes(
+            thermal_boxes, rgb_boxes, body.effective_from, effective_until=body.effective_until,
+            stems=point_stems, source_stem=",".join(stems), profile_id=body.profile_id, label=body.label,
+        )
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    aligned_count = align_all(force=True)
+    aligned_count = align_all(force=True, profile_id=profile_id)
     logging.info(
-        f"Calibrated from {len(body.pairs)} boxes across {len(stems)} image(s); "
+        f"Calibrated profile {profile_id} from {len(body.pairs)} boxes across {len(stems)} image(s); "
         f"re-aligned {aligned_count} file(s)"
     )
 
@@ -135,6 +179,7 @@ async def submit_box_calibration(body: BoxCalibrationSubmission):
 
     return {
         "status": "ok",
+        "profile_id": profile_id,
         "point_count": len(body.pairs),
         "image_count": len(stems),
         "aligned_count": aligned_count,
@@ -143,21 +188,32 @@ async def submit_box_calibration(body: BoxCalibrationSubmission):
     }
 
 
+class AutoCalibrationSubmission(BaseModel):
+    effective_from: str
+    effective_until: str | None = None
+    profile_id: str | None = None
+    label: str = ""
+
+
 @router.post("/auto")
-async def auto_submit_calibration():
+async def auto_submit_calibration(body: AutoCalibrationSubmission):
     try:
-        _, points, diagnostics = await asyncio.to_thread(auto_calibrate)
-    except RuntimeError as e:
+        _, points, diagnostics, profile_id = await asyncio.to_thread(
+            auto_calibrate, body.effective_from, effective_until=body.effective_until,
+            profile_id=body.profile_id, label=body.label,
+        )
+    except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    aligned_count = align_all(force=True)
+    aligned_count = align_all(force=True, profile_id=profile_id)
     logging.info(
-        f"Auto-calibrated from {diagnostics['pairs_matched']}/{diagnostics['pairs_considered']} frames; "
-        f"re-aligned {aligned_count} file(s)"
+        f"Auto-calibrated profile {profile_id} from {diagnostics['pairs_matched']}/{diagnostics['pairs_considered']} "
+        f"frames; re-aligned {aligned_count} file(s)"
     )
 
     return {
         "status": "ok",
+        "profile_id": profile_id,
         "point_count": len(points),
         "pairs_considered": diagnostics["pairs_considered"],
         "pairs_matched": diagnostics["pairs_matched"],
@@ -167,13 +223,27 @@ async def auto_submit_calibration():
 
 
 @router.get("/stats")
-async def calibration_stats():
-    try:
-        data = load_calibration()
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+async def calibration_stats(profile_id: str | None = None, at: str | None = None):
+    """Fit summary for one calibration profile. Defaults to whichever profile covers `at`
+    (an ISO timestamp, default now) if `profile_id` isn't given explicitly — i.e. "the
+    profile that would be used for a capture right now." Use `GET /thermal/calibrate/profiles`
+    to see all of them."""
+    profiles = load_profiles()
+    if profile_id:
+        data = next((p for p in profiles if p["id"] == profile_id), None)
+        if data is None:
+            raise HTTPException(status_code=404, detail=f"No profile with id {profile_id!r}")
+    else:
+        ts = at or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        data = find_profile_for_timestamp(ts, profiles=profiles)
+        if data is None:
+            raise HTTPException(status_code=404, detail="No calibration profile covers this time")
 
     base = {
+        "id": data.get("id"),
+        "label": data.get("label", ""),
+        "effective_from": data.get("effective_from"),
+        "effective_until": data.get("effective_until"),
         "calibrated_at": data.get("calibrated_at"),
         "method": data.get("method"),
         "point_count": data.get("point_count"),

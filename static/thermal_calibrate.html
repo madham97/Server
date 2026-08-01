@@ -12,6 +12,22 @@
 
   #autoBox { background: #222; border: 1px solid #444; border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
+  #profilesPanel { background: #222; border: 1px solid #444; border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; }
+  #profilesPanel > .head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  #profilesPanel b { font-size: 13px; color: #7cf; }
+  #profilesTable { border-collapse: collapse; font-size: 12px; width: 100%; max-width: 900px; }
+  #profilesTable th { text-align: left; color: #999; border-bottom: 1px solid #444; padding: 4px 8px; }
+  #profilesTable td { padding: 4px 8px; border-bottom: 1px solid #2a2a2a; }
+  #profilesTable tr.editing td { background: rgba(255, 220, 80, 0.08); }
+  #profilesTable button { font-size: 11px; padding: 1px 6px; }
+  #profilesEmpty { font-size: 12px; color: #999; }
+
+  #windowRow { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; font-size: 12px; color: #999; }
+  #windowRow input[type="datetime-local"] {
+    background: #2a2a2a; border: 1px solid #555; color: #e0e0e0; border-radius: 4px; padding: 4px 6px; font-size: 12px;
+  }
+  #editingBanner { color: #fd6; font-weight: bold; }
+
   #controls { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
   select, button {
     background: #2a2a2a; border: 1px solid #555; color: #e0e0e0;
@@ -74,14 +90,37 @@
   submit with at least 3 &mdash; more, spread across several images, is better.
 </p>
 
+<div id="profilesPanel">
+  <div class="head">
+    <b>Calibration profiles</b>
+    <span style="font-size:12px; color:#999; max-width:700px;">
+      Each profile only applies to captures whose own timestamp falls in its effective window &mdash; use this
+      when the camera moves: give the new fit a window starting from the move, and captures before that keep
+      using the old profile they were correctly aligned with.
+    </span>
+  </div>
+  <table id="profilesTable">
+    <thead><tr><th>effective window</th><th>method</th><th>fit</th><th>label</th><th></th></tr></thead>
+    <tbody id="profilesBody"></tbody>
+  </table>
+  <p id="profilesEmpty" style="display:none;">No calibration profiles saved yet.</p>
+</div>
+
 <div id="autoBox">
   <button id="autoBtn">Run automatic calibration</button>
   <span style="font-size:12px; color:#999; max-width:600px;">
     Scans every capture, finds whatever stands out most from the background in each spectrum independently
-    (background subtraction, no drawing), and fits a calibration from however many frames agree. Overwrites
-    the current calibration below &mdash; draw boxes afterward if you want to refine it further.
+    (background subtraction, no drawing), and fits a calibration profile over the window set below. Draw
+    boxes afterward if you want to refine it further.
   </span>
   <span id="autoStatus" style="font-size:12px; color:#7cf;"></span>
+</div>
+
+<div id="windowRow">
+  <span id="editingBanner" style="display:none;">Editing profile <span id="editingLabel"></span> &mdash;</span>
+  <label>effective from <input type="datetime-local" id="effectiveFrom"></label>
+  <label>until (blank = open-ended) <input type="datetime-local" id="effectiveUntil"></label>
+  <button id="cancelEditBtn" style="display:none;">Cancel edit, start new profile</button>
 </div>
 
 <div id="controls">
@@ -143,6 +182,24 @@ let currentStem = null;
 let allPairs = [];        // {stem, rgb:[x1,y1,x2,y2], thermal:[x1,y1,x2,y2]}, persists across image switches
 let pendingRgbBox = null; // [x1,y1,x2,y2] awaiting its thermal match, current image only
 let statsBoxes = [];
+let editingProfileId = null; // non-null while refitting an existing calibration profile in place
+
+// datetime-local inputs give/take "YYYY-MM-DDTHH:MM" in the browser's local timezone with no
+// seconds or zone offset; the server stores/compares UTC 'Z' timestamps throughout.
+function isoFromLocalInput(value) {
+  if (!value) return null;
+  return new Date(value).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+function localInputFromIso(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+const effectiveFromInput = document.getElementById('effectiveFrom');
+const effectiveUntilInput = document.getElementById('effectiveUntil');
+effectiveFromInput.value = localInputFromIso(new Date().toISOString());
 
 const picker = document.getElementById('picker');
 const rgbImg = document.getElementById('rgbImg');
@@ -159,6 +216,89 @@ function setLog(message, isError) {
   logEl.textContent = message || '';
   logEl.style.color = isError ? '#f88' : '#8f8';
 }
+
+function fmtWindow(from, until) {
+  const short = iso => iso ? iso.replace('T', ' ').replace('Z', '') : '';
+  return `${short(from)} → ${until ? short(until) : 'open-ended'}`;
+}
+
+async function loadProfiles() {
+  const res = await fetch('/thermal/calibrate/profiles');
+  const profiles = await res.json();
+  const bodyEl = document.getElementById('profilesBody');
+  const emptyEl = document.getElementById('profilesEmpty');
+  if (!profiles.length) {
+    bodyEl.innerHTML = '';
+    emptyEl.style.display = 'block';
+    return;
+  }
+  emptyEl.style.display = 'none';
+  bodyEl.innerHTML = profiles.map(p => {
+    const fit = p.point_count ? `${p.inlier_count ?? '?'}/${p.point_count} inliers` : '';
+    return `
+    <tr class="${p.id === editingProfileId ? 'editing' : ''}">
+      <td>${fmtWindow(p.effective_from, p.effective_until)}</td>
+      <td>${p.method || ''}</td>
+      <td>${fit}</td>
+      <td>${p.label || ''}</td>
+      <td>
+        <button class="editProfileBtn" data-id="${p.id}">Edit</button>
+        <button class="deleteProfileBtn" data-id="${p.id}">Delete</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function startEditingProfile(profileId, boxes, effectiveFrom, effectiveUntil, label) {
+  editingProfileId = profileId;
+  allPairs = (boxes || []).filter(b => b.stem).map(b => ({ stem: b.stem, rgb: b.rgb, thermal: b.thermal }));
+  effectiveFromInput.value = localInputFromIso(effectiveFrom);
+  effectiveUntilInput.value = localInputFromIso(effectiveUntil);
+  document.getElementById('editingBanner').style.display = '';
+  document.getElementById('editingLabel').textContent = label || profileId;
+  document.getElementById('cancelEditBtn').style.display = '';
+  if (allPairs.length && candidates.some(c => c.stem === allPairs[0].stem)) {
+    selectStem(allPairs[0].stem);
+  } else {
+    render();
+  }
+  renderStats(boxes || []);
+}
+
+function stopEditingProfile() {
+  editingProfileId = null;
+  allPairs = [];
+  pendingRgbBox = null;
+  effectiveFromInput.value = localInputFromIso(new Date().toISOString());
+  effectiveUntilInput.value = '';
+  document.getElementById('editingBanner').style.display = 'none';
+  document.getElementById('cancelEditBtn').style.display = 'none';
+  render();
+  renderStats([]);
+}
+
+document.getElementById('cancelEditBtn').addEventListener('click', stopEditingProfile);
+
+document.getElementById('profilesBody').addEventListener('click', async (e) => {
+  const editBtn = e.target.closest('.editProfileBtn');
+  const delBtn = e.target.closest('.deleteProfileBtn');
+
+  if (editBtn) {
+    const id = editBtn.dataset.id;
+    const res = await fetch(`/thermal/calibrate/stats?profile_id=${encodeURIComponent(id)}`);
+    if (!res.ok) { setLog('Could not load that profile', true); return; }
+    const data = await res.json();
+    startEditingProfile(id, data.boxes, data.effective_from, data.effective_until, data.label);
+    await loadProfiles();
+  } else if (delBtn) {
+    const id = delBtn.dataset.id;
+    if (!confirm('Delete this calibration profile? Captures in its window will be unaligned until another profile covers them.')) return;
+    const res = await fetch(`/thermal/calibrate/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) { setLog('Could not delete that profile', true); return; }
+    if (editingProfileId === id) stopEditingProfile();
+    await loadProfiles();
+  }
+});
 
 async function loadCandidates() {
   const res = await fetch('/thermal/calibrate/candidates');
@@ -414,20 +554,33 @@ document.getElementById('nextBtn').addEventListener('click', () => {
 
 document.getElementById('submitBtn').addEventListener('click', async () => {
   setLog('');
+  const effectiveFrom = isoFromLocalInput(effectiveFromInput.value);
+  if (!effectiveFrom) { setLog('Set an effective-from date first', true); return; }
   submitBtn.disabled = true;
   try {
     const res = await fetch('/thermal/calibrate/boxes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pairs: allPairs, preview_stem: currentStem }),
+      body: JSON.stringify({
+        pairs: allPairs, preview_stem: currentStem,
+        effective_from: effectiveFrom, effective_until: isoFromLocalInput(effectiveUntilInput.value),
+        profile_id: editingProfileId,
+      }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Calibration failed');
 
     const c = candidates.find(x => x.stem === currentStem);
     showAlignedPreview(currentStem, c.source_image);
-    statusEl.textContent = `Saved calibration from ${data.point_count} box pairs across ${data.image_count} image(s); re-aligned ${data.aligned_count} file(s)`;
+    statusEl.textContent = `Saved profile ${data.profile_id} from ${data.point_count} box pairs across ${data.image_count} image(s); re-aligned ${data.aligned_count} file(s)`;
     renderStats(data.boxes);
+    // Keep editing the same (now-saved) profile — further boxes added and submitted refine it
+    // in place rather than creating a duplicate. "Cancel edit" starts a genuinely new profile.
+    editingProfileId = data.profile_id;
+    document.getElementById('editingBanner').style.display = '';
+    document.getElementById('editingLabel').textContent = data.profile_id;
+    document.getElementById('cancelEditBtn').style.display = '';
+    await loadProfiles();
   } catch (err) {
     setLog(err.message, true);
   } finally {
@@ -503,16 +656,25 @@ const autoBtn = document.getElementById('autoBtn');
 const autoStatus = document.getElementById('autoStatus');
 
 autoBtn.addEventListener('click', async () => {
+  const effectiveFrom = isoFromLocalInput(effectiveFromInput.value);
+  if (!effectiveFrom) { autoStatus.textContent = 'Set an effective-from date first'; autoStatus.style.color = '#f88'; return; }
   autoBtn.disabled = true;
   autoStatus.textContent = 'Scanning captures, this can take a minute...';
   autoStatus.style.color = '#7cf';
   try {
-    const res = await fetch('/thermal/calibrate/auto', { method: 'POST' });
+    const res = await fetch('/thermal/calibrate/auto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        effective_from: effectiveFrom, effective_until: isoFromLocalInput(effectiveUntilInput.value),
+        profile_id: editingProfileId,
+      }),
+    });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Automatic calibration failed');
 
     const inliers = data.points.filter(p => p.inlier).length;
-    autoStatus.textContent = `Matched ${data.pairs_matched}/${data.pairs_considered} frames, ` +
+    autoStatus.textContent = `Saved profile ${data.profile_id} — matched ${data.pairs_matched}/${data.pairs_considered} frames, ` +
       `${inliers}/${data.point_count} inliers, re-aligned ${data.aligned_count} file(s)`;
     autoStatus.style.color = '#afa';
     if (currentStem) {
@@ -520,6 +682,7 @@ autoBtn.addEventListener('click', async () => {
       if (c) showAlignedPreview(currentStem, c.source_image);
     }
     document.getElementById('stats').style.display = 'none';
+    await loadProfiles();
   } catch (err) {
     autoStatus.textContent = err.message;
     autoStatus.style.color = '#f88';
@@ -530,6 +693,7 @@ autoBtn.addEventListener('click', async () => {
 
 loadCandidates();
 loadExistingStats();
+loadProfiles();
 </script>
 </body>
 </html>
