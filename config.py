@@ -1,7 +1,14 @@
+import os
 from pathlib import Path
 
 # Directory configuration
 _BASE = Path(__file__).parent
+
+# Shared secret required by POST /upload. Set via the UPLOAD_TOKEN environment variable.
+# Empty means the endpoint stays open — acceptable only while the server is unreachable from
+# the internet (e.g. behind a tunnel whose URL is not published). Set it before forwarding a
+# public port: /upload writes files to disk and is otherwise unauthenticated.
+UPLOAD_TOKEN = os.environ.get("UPLOAD_TOKEN", "").strip()
 
 UPLOAD_DIR = _BASE / "uploads"
 PROCESSED_DIR = _BASE / "processed"

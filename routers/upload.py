@@ -1,15 +1,16 @@
 import io
 import json
 import logging
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, BackgroundTasks, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, BackgroundTasks, UploadFile, File, Form, Header, HTTPException
 from PIL import Image as PILImage
 
-from config import THERMAL_DIR, UPLOAD_DIR, UPLOAD_LOG
+from config import THERMAL_DIR, UPLOAD_DIR, UPLOAD_LOG, UPLOAD_TOKEN
 from thermal_align import align_thermal, find_profile_for_timestamp
 
 router = APIRouter()
@@ -42,10 +43,25 @@ def _align_new_capture(thermal_png: Path, stem: str, timestamp: str) -> None:
 # the uploads watcher regardless of how it filters.
 
 
+def _check_upload_token(header_token: str, form_token: str) -> None:
+    """Reject the request unless it carries the shared secret. Accepts it either as the
+    X-Upload-Token header or as a `token` multipart field: the Pi's SIM800 sets custom
+    headers through AT+HTTPPARA="USERDATA", whose behaviour varies by firmware, so the
+    uploader sends the field instead — it needs no extra AT commands and rides along in the
+    multipart body it already builds. compare_digest keeps the comparison constant-time."""
+    if not UPLOAD_TOKEN:
+        return
+    supplied = header_token or form_token or ""
+    if not secrets.compare_digest(supplied, UPLOAD_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing upload token")
+
+
 @router.post("/upload")
 async def upload(
     background_tasks: BackgroundTasks,
     image: UploadFile = File(None),
+    token: str = Form(""),
+    x_upload_token: str = Header(None),
     device_id: str = Form(""),
     mode: str = Form(""),
     motion_score: str = Form(""),
@@ -55,6 +71,8 @@ async def upload(
     thermal_max_c: str = Form(""),
     thermal_avg_c: str = Form(""),
 ):
+    _check_upload_token(x_upload_token, token)
+
     if image is None:
         raise HTTPException(status_code=422, detail="No file provided")
 
@@ -91,7 +109,13 @@ async def upload(
             data = buf.getvalue()
             filename = stem + '.jpg'
     else:
-        filename = image.filename
+        # Path().name strips any directory components the client sent. Without it a filename
+        # like "../../.ssh/authorized_keys" escapes UPLOAD_DIR and turns this endpoint into an
+        # arbitrary file write. The WebP branches above are already safe — they rebuild the
+        # name from Path(...).stem — so this is the only path that sees the raw client string.
+        filename = Path(image.filename or '').name
+        if not filename:
+            raise HTTPException(status_code=422, detail="Invalid filename")
 
     (UPLOAD_DIR / filename).write_bytes(data)
 

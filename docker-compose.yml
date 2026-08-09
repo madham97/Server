@@ -3,6 +3,11 @@ services:
     build: .
     ports:
       - "8000:8000"
+    environment:
+      # Shared secret for POST /upload. Set it in a .env file next to this compose file
+      # (UPLOAD_TOKEN=...) and give the Pi the same value as "upload_token" in client.json.
+      # Left empty the endpoint is unauthenticated — see README.
+      - UPLOAD_TOKEN=${UPLOAD_TOKEN:-}
     volumes:
       - ./models:/app/models
       - ./uploads:/app/uploads
