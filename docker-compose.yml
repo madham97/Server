@@ -13,6 +13,9 @@ services:
       - ./uploads:/app/uploads
       - ./thermal:/app/thermal
       - ./calibration:/app/calibration
+      # Update bundles published to the field devices. Mounted so a new bundle can be dropped in
+      # without rebuilding the image — the whole point is shipping code without touching hardware.
+      - ./client_updates:/app/client_updates
       - ./processed:/app/processed
       - ./annotated:/app/annotated
       - ./failed:/app/failed

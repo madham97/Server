@@ -80,6 +80,33 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 ---
 
+### Field devices pull their own updates, on probation until an upload proves them
+
+**Decision:** `GET /client-update/manifest` and `/client-update/bundle` publish a client bundle (newest `.tgz` in `client_updates/`, bind-mounted so publishing needs no rebuild). Devices fetch it over their existing GSM uplink, verify its digest, compile-check it, snapshot what it replaces, install it, and enter *probation*. Probation ends only when the device **completes a real upload**; if that doesn't happen within a window (default 3 h), a systemd timer restores the snapshot.
+
+**Why it worked:** the devices have no inbound path at all. The SIM800 is driven by `AT+HTTPACTION`, so there is no IP stack on the uplink — SSH and Tailscale both need an interface that doesn't exist, and the measured throughput (~1.8 KB/s, ~14 kbps GPRS, from upload arrival gaps) makes an interactive session unusable even over the legacy pppd link, which in any case contends with the uploader for the same `/dev/serial0`. Pull was the only option. A ~52 KB bundle is ~38 s of transfer on that link — the link can carry an update, it just can't carry a shell.
+
+The design question was never the download; it was that a self-updater on an unreachable device can destroy its own recovery path. Three choices follow from that:
+
+- **Success is a completed upload**, not a started process or a parsed file. Losing the uplink is the only unrecoverable failure, so the uplink is the only thing worth testing. A version that boots happily but can't reach the server would pass any weaker check and still require a site visit.
+- **The watchdog depends on nothing from the bundle.** Separate systemd timer, system Python, standard library only — because its entire job is to work when the code it watches does not.
+- **Verify before installing, not after.** Digest mismatch and syntax errors are caught while the live tree is untouched; a truncated transfer over 2G is a routine event, not an exceptional one.
+
+Config, the venv and the image queues are never bundled — a rollback that reverted the SIM PIN and server URL would be its own outage.
+
+**On by default.** The devices have no other update path, so leaving it off would mean every future change is a site visit — the cost the feature exists to remove. The safety is the probation contract, not withholding the feature. Two guards make defaulting it on defensible, both of which only matter at fleet scale:
+
+- **An empty outbox defers the rollback** (capped at 24 h). Nothing queued means nothing needed uploading, so a missing upload is not evidence against the new code. This deployment captures almost nothing between 19:00 and 06:00 UTC, so a fixed timer would revert good updates nightly.
+- **A rolled-back version is not retried for 24 h.** Without it a device reinstalls what it just rejected on the next check and loops, spending a bundle of metered 2G each time. Matching is on the version string, so publishing a fix clears the block at once.
+
+**Trade-off:** the failure mode inverts rather than disappears. The worst case becomes "the update didn't take, and you learn that from telemetry" instead of "the device went silent." That is a large improvement but not a guarantee: a bundle that compiles, uploads successfully, and *then* misbehaves will be confirmed and kept. The probation check proves the uplink survived, nothing more.
+
+The watchdog is deliberately duplicated rather than shared: it imports nothing from `pi-client`, because importing the rescue path out of the tree an update just replaced puts it inside the blast radius. Staging compile-checks every bundle so a syntax error cannot get that far, but a module that imports cleanly and misbehaves at runtime can. Verified by destroying `updater.py` on a device in probation — the watchdog still restored it.
+
+**Not addressed:** bundles are unsigned. The digest protects against corruption in transit, not against a compromised server — anyone who can write to `client_updates/` can run code on every device. That is acceptable while the server is the same trust domain as the devices, and should be revisited before this is used across an untrusted network.
+
+---
+
 ### Thermal frames travel at sensor resolution instead of stretched into an alpha channel
 
 **Decision:** The Pi sends the thermal frame as its own `thermal` part of the same upload POST, at the sensor's native 80×62, and the server stores it that way. `POST /upload` accepts either that or the previous RGBA-fused WebP; the recorder picks by `thermal_native_transport` (default on). `align_thermal` maps whatever resolution it finds onto the calibration reference via `homography @ scale_to_reference(...)`, so both formats align with the same saved profile.

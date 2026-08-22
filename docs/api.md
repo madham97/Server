@@ -387,6 +387,22 @@ Clicking any image on a card opens a full-size **overlay lightbox** — the alig
 
 ---
 
+### `GET /client-update/manifest?device_id=`
+What client bundle is currently published, so a device can tell whether it already has it. Kept tiny — devices poll this far more often than they download, and every byte crosses a ~1.8 KB/s GSM link.
+
+**Response:** `{ "version", "sha256", "size", "encoded_size" }`, or `{ "version": null }` if nothing is published. `sha256` is of the **decoded** bundle, so a device verifies what it will install rather than the wire form.
+
+---
+
+### `GET /client-update/bundle?device_id=`
+The published bundle, **base64-encoded** as `text/plain`. **404** if nothing is published.
+
+Base64 rather than raw bytes because devices fetch through a 2G modem's `AT+HTTPREAD`, which returns the payload across a serial link as text. The 33% overhead (~52 KB → ~71 KB, roughly 7 extra seconds) buys immunity to that transport.
+
+Publishing is a file drop: the newest `.tgz` in `client_updates/` wins, so deleting one rolls the fleet back to the previous. Build bundles with `scripts/build-update-bundle.sh` in the `Rodent-client` repo. The directory is bind-mounted in `docker-compose.yml`, so publishing needs no rebuild.
+
+---
+
 ### `GET /thermal/image/{name}`
 Serve a raw thermal PNG from `thermal/`. Used by the `/thermal` page; `name` is validated to resolve inside `thermal/` before serving.
 

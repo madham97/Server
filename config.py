@@ -27,6 +27,10 @@ PROCESSED_LOG = _BASE / "processed_log.txt"
 ANNOTATION_LOG = _BASE / "annotation_log.txt"
 
 # Dataset
+# Client update bundles published to the field devices. Drop a .tgz here (newest wins) and the
+# devices pick it up on their next poll — see routers/client_update.py.
+CLIENT_UPDATE_DIR = _BASE / "client_updates"
+
 DATASET_DIR = _BASE / "dataset"
 CLASSES_FILE = _BASE / "classes.json"
 
