@@ -37,6 +37,23 @@ def _parse_date(value: str | None) -> date | None:
         raise HTTPException(status_code=400, detail=f"Invalid date {value!r}, expected YYYY-MM-DD")
 
 
+def _parse_hour(value: int | None, field: str) -> int | None:
+    if value is None:
+        return None
+    if not 0 <= value <= 23:
+        raise HTTPException(status_code=400, detail=f"Invalid {field} {value!r}, expected an hour 0-23")
+    return value
+
+
+def _hour_in_window(hour: int, start: int, end: int) -> bool:
+    """Inclusive at both ends, and wraps through midnight when start > end — 18→06 means the
+    night, not the empty set. Wrapping is the point of this filter: the animals are nocturnal,
+    so the interesting window always straddles 00:00 UTC."""
+    if start <= end:
+        return start <= hour <= end
+    return hour >= start or hour <= end
+
+
 _PAGE_HEAD = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -67,8 +84,9 @@ _PAGE_HEAD = """<!DOCTYPE html>
   }
   form.filters button { cursor: pointer; border-color: #4af; background: #245; }
   form.filters a.clear { color: #888; font-size: 0.8em; padding-bottom: 6px; }
-  form.filters .count { margin-left: auto; font-size: 0.8em; color: #888; padding-bottom: 6px; }
+  form.filters .count { margin-left: auto; font-size: 0.8em; color: #888; padding-bottom: 6px; text-align: right; }
   form.filters .count b { color: #afa; }
+  form.filters .wrap { color: #fd6; }
 
   .pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 20px 0; }
   .pager a { text-decoration: none; cursor: pointer; }
@@ -196,18 +214,15 @@ _PAGE_TAIL = """
 </html>"""
 
 
-def _page_url(page: int, start: str | None, end: str | None, per_page: int) -> str:
+def _page_url(page: int, filters: dict, per_page: int) -> str:
     params = {"page": page}
-    if start:
-        params["start"] = start
-    if end:
-        params["end"] = end
+    params.update({k: v for k, v in filters.items() if v not in (None, "")})
     if per_page != DEFAULT_PER_PAGE:
         params["per_page"] = per_page
     return "/thermal?" + urlencode(params)
 
 
-def _render_pager(page: int, pages: int, start: str | None, end: str | None, per_page: int) -> str:
+def _render_pager(page: int, pages: int, filters: dict, per_page: int) -> str:
     if pages <= 1:
         return ""
 
@@ -215,7 +230,7 @@ def _render_pager(page: int, pages: int, start: str | None, end: str | None, per
         label = text or str(p)
         if p == page and text is None:
             return f'<span class="cur">{label}</span>'
-        return f'<a href="{_page_url(p, start, end, per_page)}">{label}</a>'
+        return f'<a href="{_page_url(p, filters, per_page)}">{label}</a>'
 
     # First, last, and a window around the current page — 400+ page links is unusable.
     window = {1, pages, page}
@@ -239,29 +254,44 @@ def _render_pager(page: int, pages: int, start: str | None, end: str | None, per
 async def thermal_view(
     start: str | None = None,
     end: str | None = None,
+    hour_start: int | None = None,
+    hour_end: int | None = None,
     page: int = 1,
     per_page: int = DEFAULT_PER_PAGE,
     limit: int | None = None,
 ):
     """Browse capture pairs, newest first. `start`/`end` are inclusive UTC capture dates
-    (YYYY-MM-DD); `limit` is the pre-pagination alias kept for older links and just sets
+    (YYYY-MM-DD) and `hour_start`/`hour_end` an inclusive UTC hour-of-day window that may wrap
+    through midnight; `limit` is the pre-pagination alias kept for older links and just sets
     `per_page`."""
     if limit is not None:
         per_page = limit
     per_page = max(1, min(per_page, MAX_PER_PAGE))
     page = max(1, page)
     start_date, end_date = _parse_date(start), _parse_date(end)
+    hour_start = _parse_hour(hour_start, "hour_start")
+    hour_end = _parse_hour(hour_end, "hour_end")
+    # One bound on its own still defines a window — the other end is just the edge of the day.
+    if hour_start is not None or hour_end is not None:
+        hour_from = 0 if hour_start is None else hour_start
+        hour_to = 23 if hour_end is None else hour_end
+    else:
+        hour_from = hour_to = None
+
+    filters = {"start": start, "end": end, "hour_start": hour_start, "hour_end": hour_end}
 
     sidecars = sorted(THERMAL_DIR.glob("*_thermal.json"), reverse=True)
-    if start_date or end_date:
+    if start_date or end_date or hour_from is not None:
         filtered = []
         for sidecar in sidecars:
             captured = _stem_datetime(sidecar.name)
             if captured is None:
-                continue  # unparseable name: can't place it on the timeline, so a date filter excludes it
+                continue  # unparseable name: can't place it on the timeline, so a filter excludes it
             if start_date and captured.date() < start_date:
                 continue
             if end_date and captured.date() > end_date:
+                continue
+            if hour_from is not None and not _hour_in_window(captured.hour, hour_from, hour_to):
                 continue
             filtered.append(sidecar)
         sidecars = filtered
@@ -271,24 +301,35 @@ async def thermal_view(
     page = min(page, pages)
     window = sidecars[(page - 1) * per_page: page * per_page]
 
-    filters = f"""
+    def hour_options(selected: int | None) -> str:
+        opts = [f'<option value=""{"" if selected is not None else " selected"}>any</option>']
+        opts += [f'<option value="{h}"{" selected" if h == selected else ""}>{h:02d}:00</option>'
+                 for h in range(24)]
+        return "".join(opts)
+
+    any_filter = bool(start_date or end_date or hour_from is not None)
+    wrapped = hour_from is not None and hour_from > hour_to
+    filter_bar = f"""
 <form class="filters" method="get" action="/thermal">
   <label>from (UTC date)<input type="date" name="start" value="{start or ''}"></label>
   <label>to (UTC date)<input type="date" name="end" value="{end or ''}"></label>
+  <label>hour from (UTC)<select name="hour_start">{hour_options(hour_start)}</select></label>
+  <label>hour to (UTC)<select name="hour_end">{hour_options(hour_end)}</select></label>
   <label>per page<select name="per_page">
     {"".join(f'<option value="{n}"{" selected" if n == per_page else ""}>{n}</option>' for n in (12, 24, 48, 96, 200))}
   </select></label>
   <button type="submit">Apply</button>
   <a class="clear" href="/thermal">clear filters</a>
-  <span class="count"><b>{total}</b> capture(s) match{" (all captures)" if not (start_date or end_date) else ""}</span>
+  <span class="count"><b>{total}</b> capture(s) match{"" if any_filter else " (all captures)"}
+    {'<br><span class="wrap">hour window wraps through midnight</span>' if wrapped else ''}</span>
 </form>"""
 
     if not window:
-        body = '<p class="empty">No thermal captures match this date range.</p>' if total == 0 and (start_date or end_date) \
-            else '<p class="empty">No thermal captures yet.</p>'
-        return _PAGE_HEAD + filters + body + _PAGE_TAIL
+        body = ('<p class="empty">No thermal captures match these filters.</p>' if any_filter
+                else '<p class="empty">No thermal captures yet.</p>')
+        return _PAGE_HEAD + filter_bar + body + _PAGE_TAIL
 
-    pager = _render_pager(page, pages, start, end, per_page)
+    pager = _render_pager(page, pages, filters, per_page)
 
     cards = []
     for sidecar in window:
@@ -327,7 +368,7 @@ async def thermal_view(
   </div>
 </div>""")
 
-    return (_PAGE_HEAD + filters + pager + f'<div class="grid">{"".join(cards)}</div>'
+    return (_PAGE_HEAD + filter_bar + pager + f'<div class="grid">{"".join(cards)}</div>'
             + pager + _LIGHTBOX + _PAGE_TAIL)
 
 

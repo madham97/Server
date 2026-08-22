@@ -80,11 +80,25 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 ---
 
+### Thermal frames record the normalization window they were encoded with
+
+**Decision:** The capture sidecar now carries `thermal_norm_min_c`/`thermal_norm_max_c` — the fixed °C window the 0-255 pixel values were actually encoded against — plus `thermal_norm_source` (`reported` when the device sent it, `assumed_legacy_default` when the server filled in 10–45 °C for an older client). The Pi writes the window in `_write_sidecar`, the uploader passes it through its form-field whitelist, and `POST /upload` persists it.
+
+**Why it worked:** `frame_to_gray8` documents the decode as `temp_c = norm_min + (pixel/255) * (norm_max - norm_min)` "using whatever norm_min_c/norm_max_c this frame was actually encoded with" — but that value was never recorded anywhere. Both bounds are `config.get()` values on the Pi, so retuning them (which is under active discussion, to improve apparent contrast) would silently invalidate the decode for every subsequent frame, with nothing in the data to distinguish old from new. The alternative — pinning the constants and forbidding changes — trades a ~30-byte-per-capture cost for a permanent constraint on a value that legitimately may need retuning per deployment.
+
+The observed `thermal_min_c`/`max_c`/`avg_c` already in the sidecar are *not* a substitute: they are the frame's own range, and decoding against them rescales every frame differently — precisely the failure the fixed-window normalization was introduced to fix.
+
+**Trade-off:** The 9,930 pre-existing captures have no window recorded and are not backfilled, so they rely on the `assumed_legacy_default` rule. That assumption is believed sound (nothing had overridden the defaults) but is not verifiable from the data — which is the whole reason for recording it explicitly from now on.
+
+---
+
 ### Date filters, paging, and a click-to-open overlay on `/thermal`
 
-**Decision:** `/thermal` now takes `start`/`end` (inclusive UTC capture dates), `page`, and `per_page` (default 24, max 200), and clicking any thumbnail opens a lightbox showing the aligned thermal composited over the RGB with an opacity slider — the same overlay the calibration page renders for the single capture being calibrated, reused for browsing. `limit` is kept as an alias for `per_page` so pre-existing links don't break.
+**Decision:** `/thermal` now takes `start`/`end` (inclusive UTC capture dates), `hour_start`/`hour_end` (an inclusive UTC hour-of-day window that wraps through midnight when start > end, since a nocturnal window always straddles 00:00), `page`, and `per_page` (default 24, max 200), and clicking any thumbnail opens a lightbox showing the aligned thermal composited over the RGB with an opacity slider — the same overlay the calibration page renders for the single capture being calibrated, reused for browsing. `limit` is kept as an alias for `per_page` so pre-existing links don't break.
 
 **Why it worked:** Two cheaper-looking options were rejected. (1) Making `/thermal` a JSON API plus a static SPA like `static/thermal_calibrate.html`: the page is a *browsing* surface, and server-rendered query-param pages get shareable URLs, working back/forward, and bookmarkable filtered views for free — an SPA would have to rebuild all of that in JS. (2) Reading each sidecar's JSON `timestamp` to date-filter: with ~10k sidecars in `thermal/` that's 10k file opens on every page load, for a value already encoded in the filename (`..._YYYYMMDDTHHMMSSZ_thermal.json`). Filtering on the filename means only the ≤200 sidecars actually rendered are ever opened, so page load stays flat as the capture count grows.
+
+**Trade-off (hour filter):** The window is in UTC, matching the dates and the stored timestamps, so a Heidelberg user reading local time has to offset by 1–2h depending on DST. Storing local time instead would make the archive ambiguous across the DST boundary, which is worse for a filter whose whole purpose is selecting night hours.
 
 **Trade-off:** Lightbox navigation (`←`/`→`) is bounded to the current page rather than walking the whole filtered set, because the client only knows about the cards the server rendered — crossing a page boundary means going back and clicking again. A sidecar whose filename carries no parseable timestamp can't be placed on the timeline, so it is dropped whenever either date bound is set (it remains visible unfiltered); that only affects captures not named by the current uploader.
 

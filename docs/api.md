@@ -367,11 +367,15 @@ Browse RGB/thermal capture pairs side by side, newest first. Read-only, no side 
 |---|---|---|
 | `start` | — | Inclusive earliest capture date, `YYYY-MM-DD`, UTC. **400** if unparseable |
 | `end` | — | Inclusive latest capture date, `YYYY-MM-DD`, UTC. **400** if unparseable |
+| `hour_start` | — | Inclusive first UTC hour-of-day, `0`–`23`. **400** if out of range |
+| `hour_end` | — | Inclusive last UTC hour-of-day, `0`–`23`. **400** if out of range |
 | `page` | `1` | 1-based page number; clamped to the last page that exists |
 | `per_page` | `24` | Cards per page, clamped to 1–200 |
 | `limit` | — | Legacy alias for `per_page`, kept so older links keep working |
 
-Date filtering reads the capture time out of the sidecar **filename** (`..._YYYYMMDDTHHMMSSZ_thermal.json`), not the JSON body, so filtering ten thousand captures doesn't open ten thousand files. A sidecar whose name doesn't carry a parseable timestamp can't be placed on the timeline and is excluded whenever either date bound is set (it still shows up unfiltered).
+`hour_start`/`hour_end` select an hour-of-day window that applies within the date range, and it **wraps through midnight** when `hour_start > hour_end` — `hour_start=18&hour_end=6` means the night (18:00–23:59 plus 00:00–06:59), not the empty set. Wrapping is the normal case here, since the animals are nocturnal and the interesting window always straddles 00:00. Giving only one bound leaves the other at the edge of the day.
+
+Date and hour filtering read the capture time out of the sidecar **filename** (`..._YYYYMMDDTHHMMSSZ_thermal.json`), not the JSON body, so filtering ten thousand captures doesn't open ten thousand files. A sidecar whose name doesn't carry a parseable timestamp can't be placed on the timeline and is excluded whenever either date bound is set (it still shows up unfiltered).
 
 **Response:** HTML page. Each thermal sidecar in `thermal/` is matched to its source JPEG (via the sidecar's `source_image` field) and rendered as a card with both images, `device_id`, `timestamp`, and the min/max/avg °C range. If the source JPEG no longer exists in `uploads/` (e.g. deleted for disk space), that side shows a "rgb missing" placeholder instead of a broken image.
 

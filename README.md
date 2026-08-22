@@ -144,7 +144,7 @@ saved as `thermal/<stem>_thermal.png` with a `thermal/<stem>_thermal.json` sidec
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/thermal` | Browse RGB/thermal capture pairs side by side, newest first — date filters, paging, click-to-open overlay (`?start=&end=&page=&per_page=`) |
+| `GET` | `/thermal` | Browse RGB/thermal capture pairs side by side, newest first — date + hour-of-day filters, paging, click-to-open overlay (`?start=&end=&hour_start=&hour_end=&page=&per_page=`) |
 | `GET` | `/thermal/image/{name}` | Serve a raw thermal PNG from `thermal/` |
 | `GET` | `/config-help` | Interactive builder for `SET key=value` SMS config commands to the Pi |
 
