@@ -383,6 +383,8 @@ Date and hour filtering read the capture time out of the sidecar **filename** (`
 
 **Response:** HTML page. Each thermal sidecar in `thermal/` is matched to its source JPEG (via the sidecar's `source_image` field) and rendered as a card with both images, `device_id`, `timestamp`, and the min/max/avg °C range. If the source JPEG no longer exists in `uploads/` (e.g. deleted for disk space), that side shows a "rgb missing" placeholder instead of a broken image.
 
+A **"show thermal at true sensor resolution"** toggle at the top of the page (or the `n` key) switches every thermal image — thumbnails and lightbox — to `?native=1` with pixelated rendering, so the display stops implying detail the 80×62 sensor never captured. The choice persists in `localStorage` across paging.
+
 Clicking any image on a card opens a full-size **overlay lightbox** — the aligned thermal composited over the RGB with an opacity slider, the same comparison the calibration page shows for a single capture. `←`/`→` step through the cards on the current page, `↑`/`↓` nudge opacity, `s` swaps the overlay between the aligned thermal and the raw (unaligned) thermal frame, `esc` closes. Captures with no aligned counterpart yet open with the raw thermal and a "not aligned yet" note; captures with no RGB show the thermal alone.
 
 ---
@@ -403,8 +405,21 @@ Publishing is a file drop: the newest `.tgz` in `client_updates/` wins, so delet
 
 ---
 
-### `GET /thermal/image/{name}`
+### `GET /thermal/image/{name}?native=`
 Serve a raw thermal PNG from `thermal/`. Used by the `/thermal` page; `name` is validated to resolve inside `thermal/` before serving.
+
+**Query params**
+
+| Param | Default | Description |
+|---|---|---|
+| `native` | `false` | Return the frame on the sensor's own 80×62 grid rather than the interpolated form it is stored in |
+
+`native=1` exists because every capture before native transport was upsampled on the device from 80×62 to the visible frame's size, and that upsample added no information — reducing it back recovers the sensor samples to within ~0.09 gray levels (0.013 °C), measured. Serving the small image and letting the browser scale it with `image-rendering: pixelated` shows the real measurement grid: **4,960 samples, not the 2 million values a smooth 1920×1080 render implies**.
+
+The two cases differ:
+
+- A **raw** frame is reduced with `INTER_AREA` (averaging each output cell over the block it came from inverts the device's cubic upsample; point-sampling would keep whichever interpolated value happened to land there). Frames already stored natively are served unchanged.
+- An **aligned** frame can't just be reduced — warping moved the content into RGB coordinates, so its rows no longer line up with sensor cells. It is re-warped from the native grid with `INTER_NEAREST` at the calibration reference size, giving one flat block per sensor cell (measured median run 16 px against a predicted 15.8 px). Falls back to the stored frame if the raw frame or a covering calibration profile is missing.
 
 **Response:** image file (PNG). **404** if the name doesn't resolve inside `thermal/` or the file doesn't exist.
 

@@ -1,12 +1,17 @@
 import json
 import re
 from datetime import date, datetime, timezone
+from pathlib import Path
 from urllib.parse import urlencode
 
+import cv2
+import numpy as np
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from config import THERMAL_DIR, UPLOAD_DIR
+from thermal_align import (SENSOR_FRAME_SIZE, capture_timestamp, find_profile_for_timestamp,
+                            scale_to_reference)
 
 router = APIRouter(prefix="/thermal")
 
@@ -109,11 +114,28 @@ _PAGE_HEAD = """<!DOCTYPE html>
   #lbMeta .stem { color: #7cf; }
   #lbClose { position: absolute; top: 16px; right: 20px; }
   #lbLayer { color: #7cf; }
+
+  /* Native view: the browser upscales an 80x62 frame, and `pixelated` stops it smoothing the
+     result back into the interpolation we just removed. One sensor cell = one visible block. */
+  body.native .pair img.thermal, body.native #lbWrap img.thermal { image-rendering: pixelated; }
+  #nativeBar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: #1a1a1a;
+    border: 1px solid #333; border-radius: 6px; padding: 8px 14px; margin-bottom: 16px; font-size: 0.8em; color: #888; }
+  #nativeBar label { display: flex; align-items: center; gap: 6px; color: #eee; cursor: pointer; }
+  #nativeBar .note { color: #666; }
+  body.native #nativeBar { border-color: #4af; }
+  body.native #nativeBar .note b { color: #fd6; }
 </style>
 </head>
 <body>
 <h1>Thermal Pairs</h1>
 <p class="sub">RGB / thermal / aligned-thermal captures split from RGBA uploads, newest first. Click any image to open the overlay. &middot; <a href="/thermal/calibrate" style="color:#7cf;">calibrate alignment</a></p>
+
+<div id="nativeBar">
+  <label><input type="checkbox" id="nativeToggle"> show thermal at true sensor resolution</label>
+  <span class="note">The sensor is <b>80&times;62</b> &mdash; 4,960 measurements. Stored frames were
+  interpolated up to the visible frame's size on the device, which adds no information (recovering
+  the sensor grid costs ~0.036&deg;C). This shows what was actually measured.</span>
+</div>
 """
 
 _LIGHTBOX = """
@@ -122,7 +144,7 @@ _LIGHTBOX = """
   <div id="lbMeta"></div>
   <div id="lbWrap">
     <img id="lbBase" src="" alt="">
-    <img id="lbTop" class="top" src="" alt="">
+    <img id="lbTop" class="top thermal" src="" alt="">
     <div id="lbMissing">Not aligned yet &mdash; this capture arrived after the last calibration ran.</div>
   </div>
   <div id="lbControls">
@@ -150,6 +172,35 @@ const lbLayer = document.getElementById('lbLayer');
 let lbIndex = -1;
 let useAligned = true;   // overlay layer: aligned thermal (default) or the raw thermal frame
 
+// Native view is a display choice, not a different capture: the same URL with ?native=1 returns
+// the frame reduced to the sensor's grid. Kept in localStorage so it survives paging.
+let nativeView = localStorage.getItem('thermalNative') === '1';
+const nativeToggle = document.getElementById('nativeToggle');
+
+function nativeSrc(url) {
+  if (!url) return url;
+  return nativeView ? url + (url.includes('?') ? '&' : '?') + 'native=1' : url;
+}
+
+function applyNativeView() {
+  document.body.classList.toggle('native', nativeView);
+  nativeToggle.checked = nativeView;
+  cards.forEach(card => {
+    const d = card.dataset;
+    const thermal = card.querySelector('img.thermal[data-role=thermal]');
+    const aligned = card.querySelector('img.thermal[data-role=aligned]');
+    if (thermal) thermal.src = nativeSrc(d.thermal);
+    if (aligned && d.aligned) aligned.src = nativeSrc(d.aligned);
+  });
+  if (lbIndex >= 0) showCard(lbIndex);
+}
+
+nativeToggle.addEventListener('change', () => {
+  nativeView = nativeToggle.checked;
+  localStorage.setItem('thermalNative', nativeView ? '1' : '0');
+  applyNativeView();
+});
+
 function showCard(i) {
   if (i < 0 || i >= cards.length) return;
   lbIndex = i;
@@ -158,14 +209,18 @@ function showCard(i) {
   if (!hasAligned) useAligned = false;
   const overlaySrc = useAligned && hasAligned ? d.aligned : d.thermal;
 
-  lbBase.src = d.rgb || d.thermal;
-  lbTop.src = overlaySrc;
+  // With no RGB to overlay onto, the thermal frame *is* the base, so it takes the native
+  // treatment instead of the overlay layer.
+  lbBase.src = d.rgb ? d.rgb : nativeSrc(d.thermal);
+  lbBase.classList.toggle('thermal', !d.rgb);
+  lbTop.src = nativeSrc(overlaySrc);
   lbTop.style.display = d.rgb ? '' : 'none';   // no RGB to overlay onto: show the thermal alone
   lbTop.style.opacity = lbOpacity.value / 100;
   lbMissing.style.display = hasAligned ? 'none' : 'block';
   lbSwap.disabled = !hasAligned || !d.rgb;
   lbSwap.textContent = useAligned ? 'swap: raw thermal' : 'swap: aligned';
-  lbLayer.textContent = d.rgb ? (useAligned && hasAligned ? 'aligned thermal over rgb' : 'raw thermal over rgb') : 'thermal only';
+  const layer = d.rgb ? (useAligned && hasAligned ? 'aligned thermal over rgb' : 'raw thermal over rgb') : 'thermal only';
+  lbLayer.textContent = layer + (nativeView ? ' · 80×62 native' : '');
   document.getElementById('lbMeta').innerHTML =
     `<span class="stem">${d.stem}</span><br>${d.info} &middot; ${i + 1} of ${cards.length} on this page`;
   document.getElementById('lbPrev').disabled = i === 0;
@@ -192,7 +247,15 @@ lbOpacity.addEventListener('input', () => {
   lbPct.textContent = lbOpacity.value + '%';
 });
 
+applyNativeView();
+
 window.addEventListener('keydown', (e) => {
+  // 'n' works whether or not the lightbox is open — it's a page-wide display mode.
+  if (e.key === 'n' || e.key === 'N') {
+    nativeToggle.checked = !nativeToggle.checked;
+    nativeToggle.dispatchEvent(new Event('change'));
+    return;
+  }
   if (!lb.classList.contains('open')) return;
   if (e.key === 'Escape') closeLb();
   else if (e.key === 'ArrowLeft') showCard(lbIndex - 1);
@@ -349,7 +412,7 @@ async def thermal_view(
             if has_rgb else '<div class="missing">rgb missing</div><p>rgb</p>'
         )
         aligned_side = (
-            f'<img src="{aligned_url}" loading="lazy"><p>aligned</p>'
+            f'<img class="thermal" data-role="aligned" src="{aligned_url}" loading="lazy"><p>aligned</p>'
             if has_aligned else '<div class="missing">not aligned yet</div><p>aligned</p>'
         )
         cards.append(f"""
@@ -358,7 +421,7 @@ async def thermal_view(
      data-info="{meta.get('device_id', '')} &middot; {meta.get('timestamp', '')} &middot; {temps}">
   <div class="pair">
     <div>{rgb_side}</div>
-    <div><img src="/thermal/image/{thermal_png}" loading="lazy"><p>thermal</p></div>
+    <div><img class="thermal" data-role="thermal" src="/thermal/image/{thermal_png}" loading="lazy"><p>thermal</p></div>
     <div>{aligned_side}</div>
   </div>
   <div class="meta">
@@ -372,9 +435,60 @@ async def thermal_view(
             + pager + _LIGHTBOX + _PAGE_TAIL)
 
 
+def _native_png(path: Path, name: str) -> Response:
+    """The frame as the sensor actually sampled it, rather than as it was stored.
+
+    Every capture before native transport was upsampled from 80x62 to the visible frame's size
+    on the device, and that upsample added no information — reducing it back recovers the sensor
+    samples to within ~0.26 gray levels (0.036 °C), measured over the archive. Serving the small
+    image and letting the browser blow it up with `image-rendering: pixelated` shows the real
+    measurement grid: ~4,960 samples, not the 2 million values a smooth 1920x1080 render implies.
+
+    An *aligned* frame can't simply be reduced — warping moved the thermal content into RGB
+    coordinates, so its rows and columns no longer line up with sensor cells. It is instead
+    re-warped from the native grid with nearest-neighbour sampling, which shows exactly which
+    RGB pixels each sensor cell covers."""
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise HTTPException(status_code=404, detail="Thermal image not readable")
+
+    if name.endswith("_thermal_aligned.png"):
+        stem = name.removesuffix("_thermal_aligned.png")
+        source = THERMAL_DIR / f"{stem}_thermal.png"
+        timestamp = capture_timestamp(stem)
+        profile = find_profile_for_timestamp(timestamp) if timestamp else None
+        if not source.exists() or profile is None:
+            # Nothing to re-derive it from; the stored aligned frame is all there is.
+            return FileResponse(str(path), media_type="image/png")
+        raw = cv2.imread(str(source), cv2.IMREAD_GRAYSCALE)
+        if raw is None:
+            return FileResponse(str(path), media_type="image/png")
+        if (raw.shape[1], raw.shape[0]) != SENSOR_FRAME_SIZE:
+            raw = cv2.resize(raw, SENSOR_FRAME_SIZE, interpolation=cv2.INTER_AREA)
+        H = np.array(profile["homography"], dtype=np.float64)
+        ref_w, ref_h = profile.get("ref_size") or (1920, 1080)
+        H = H @ scale_to_reference(SENSOR_FRAME_SIZE[0], SENSOR_FRAME_SIZE[1], ref_w, ref_h)
+        img = cv2.warpPerspective(raw, H, (ref_w, ref_h), flags=cv2.INTER_NEAREST)
+    elif (img.shape[1], img.shape[0]) != SENSOR_FRAME_SIZE:
+        # INTER_AREA, not NEAREST: averaging each output cell over the block it came from
+        # inverts the device's cubic upsample, where point-sampling would keep whichever
+        # interpolated value happened to land on that pixel.
+        img = cv2.resize(img, SENSOR_FRAME_SIZE, interpolation=cv2.INTER_AREA)
+
+    ok, buf = cv2.imencode(".png", img)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Could not encode native thermal frame")
+    return Response(content=buf.tobytes(), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 @router.get("/image/{name}")
-async def thermal_image(name: str):
+async def thermal_image(name: str, native: bool = False):
+    """Serve a thermal PNG. `native=1` returns it on the sensor's own 80x62 grid instead of the
+    interpolated form it is stored in — see `_native_png`."""
     path = (THERMAL_DIR / name).resolve()
     if not path.is_relative_to(THERMAL_DIR.resolve()) or not path.exists():
         raise HTTPException(status_code=404, detail="Thermal image not found")
+    if native:
+        return _native_png(path, name)
     return FileResponse(str(path), media_type="image/png")

@@ -445,7 +445,7 @@ def calibrate_from_boxes(thermal_boxes: list[list[float]], rgb_boxes: list[list[
     return homography, boxes_detail, profile['id']
 
 
-def _capture_timestamp(stem: str) -> str | None:
+def capture_timestamp(stem: str) -> str | None:
     """The capture-time ISO timestamp recorded in a thermal sidecar JSON, or None if the
     sidecar is missing/unreadable. This is what a capture's applicable calibration profile
     is looked up by — not upload time or file mtime, since a batch re-upload or a delayed
@@ -533,7 +533,7 @@ def align_all(thermal_dir: Path = THERMAL_DIR, force: bool = False,
     count = 0
     for src in sorted(thermal_dir.glob('*_thermal.png')):
         stem = src.name.removesuffix('_thermal.png')
-        timestamp = _capture_timestamp(stem)
+        timestamp = capture_timestamp(stem)
         if timestamp is None:
             continue
         profile = find_profile_for_timestamp(timestamp, profiles=profiles)
@@ -846,7 +846,7 @@ def main():
             logging.info(f'Aligned {count} file(s)')
         else:
             stem = path.name.removesuffix('_thermal.png')
-            timestamp = _capture_timestamp(stem)
+            timestamp = capture_timestamp(stem)
             profile = find_profile_for_timestamp(timestamp) if timestamp else None
             if profile is None:
                 raise SystemExit(f'No calibration profile covers {stem} (capture timestamp: {timestamp})')
