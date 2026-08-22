@@ -80,6 +80,16 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 ---
 
+### Date filters, paging, and a click-to-open overlay on `/thermal`
+
+**Decision:** `/thermal` now takes `start`/`end` (inclusive UTC capture dates), `page`, and `per_page` (default 24, max 200), and clicking any thumbnail opens a lightbox showing the aligned thermal composited over the RGB with an opacity slider — the same overlay the calibration page renders for the single capture being calibrated, reused for browsing. `limit` is kept as an alias for `per_page` so pre-existing links don't break.
+
+**Why it worked:** Two cheaper-looking options were rejected. (1) Making `/thermal` a JSON API plus a static SPA like `static/thermal_calibrate.html`: the page is a *browsing* surface, and server-rendered query-param pages get shareable URLs, working back/forward, and bookmarkable filtered views for free — an SPA would have to rebuild all of that in JS. (2) Reading each sidecar's JSON `timestamp` to date-filter: with ~10k sidecars in `thermal/` that's 10k file opens on every page load, for a value already encoded in the filename (`..._YYYYMMDDTHHMMSSZ_thermal.json`). Filtering on the filename means only the ≤200 sidecars actually rendered are ever opened, so page load stays flat as the capture count grows.
+
+**Trade-off:** Lightbox navigation (`←`/`→`) is bounded to the current page rather than walking the whole filtered set, because the client only knows about the cards the server rendered — crossing a page boundary means going back and clicking again. A sidecar whose filename carries no parseable timestamp can't be placed on the timeline, so it is dropped whenever either date bound is set (it remains visible unfiltered); that only affects captures not named by the current uploader.
+
+---
+
 ### SMS config-helper rebuilt for the current `SET key=value` protocol
 
 **Decision:** Added `GET /config-help` (`routers/config_help.py`), an interactive page for building SMS config commands to text to the Pi's SIM number.
