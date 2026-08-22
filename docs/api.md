@@ -64,6 +64,8 @@ Receive an image from a field device.
 | `thermal_min_c` | text | no | Minimum temperature (°C) in the thermal frame, if `image` is a thermal-fused RGBA WebP |
 | `thermal_max_c` | text | no | Maximum temperature (°C) in the thermal frame, if `image` is a thermal-fused RGBA WebP |
 | `thermal_avg_c` | text | no | Average temperature (°C) in the thermal frame, if `image` is a thermal-fused RGBA WebP |
+| `thermal_norm_min_c` | text | no | Lower bound of the fixed °C window the frame's 0-255 pixel values were encoded against |
+| `thermal_norm_max_c` | text | no | Upper bound of that window. Sent together with `thermal_norm_min_c` or not at all |
 
 **Response**
 ```json
@@ -75,7 +77,20 @@ Receive an image from a field device.
 - Appends a row to `upload_log.txt`.
 - If the uploaded WebP has an alpha channel (thermal-fused frame): saves the alpha channel to
   `thermal/<stem>_thermal.png` and writes `thermal/<stem>_thermal.json` with `source_image`,
-  `device_id`, `timestamp`, and the `thermal_min_c`/`max_c`/`avg_c` values.
+  `device_id`, `timestamp`, the `thermal_min_c`/`max_c`/`avg_c` values, and the encoding window
+  as `thermal_norm_min_c`/`thermal_norm_max_c` plus a `thermal_norm_source` of `reported` (the
+  device sent it) or `assumed_legacy_default` (it didn't, so 10–45 °C was filled in).
+
+  **Decoding a thermal frame to temperature** uses the *norm* window, never the observed one:
+
+  ```
+  temp_c = thermal_norm_min_c + (pixel / 255) * (thermal_norm_max_c - thermal_norm_min_c)
+  ```
+
+  `thermal_min_c`/`max_c`/`avg_c` are the frame's observed range and are telemetry only —
+  decoding against them rescales every frame by a different factor, which is the exact failure
+  the fixed-window normalization exists to prevent. Values that fell outside the window at
+  capture time were clipped and cannot be recovered (measured at ~0.1% of frames).
 - If a thermal frame was split out **and** a calibration is currently saved
   (`calibration/homography.json`), schedules a background task that warps the new thermal
   frame with the saved homography and writes `thermal/<stem>_thermal_aligned.png`. Runs after

@@ -43,6 +43,39 @@ def _align_new_capture(thermal_png: Path, stem: str, timestamp: str) -> None:
 # the uploads watcher regardless of how it filters.
 
 
+# The normalization window every capture up to 2026-08-22 was encoded with — the
+# thermal_norm_min_c/thermal_norm_max_c defaults on the client, which nothing had overridden.
+# Clients from that era don't report the window at all, so it has to be filled in here for their
+# frames to stay decodable; `thermal_norm_source` marks that as an assumption rather than
+# letting it masquerade as something the device actually told us.
+LEGACY_THERMAL_NORM_MIN_C = 10.0
+LEGACY_THERMAL_NORM_MAX_C = 45.0
+
+
+def _thermal_norm_fields(reported_min: str, reported_max: str) -> dict:
+    """The °C window a thermal frame's 0-255 pixel values were encoded against, which is what
+    turns a stored frame back into temperatures: temp_c = min + (pixel / 255) * (max - min).
+    Distinct from thermal_min_c/thermal_max_c, which are the frame's *observed* range and are
+    telemetry only — decoding with those instead silently rescales every frame differently."""
+    try:
+        if reported_min and reported_max:
+            return {
+                'thermal_norm_min_c': float(reported_min),
+                'thermal_norm_max_c': float(reported_max),
+                'thermal_norm_source': 'reported',
+            }
+    except ValueError:
+        logging.warning(
+            f'Ignoring unparseable thermal norm window from device: '
+            f'{reported_min!r}..{reported_max!r} — recording the legacy default instead'
+        )
+    return {
+        'thermal_norm_min_c': LEGACY_THERMAL_NORM_MIN_C,
+        'thermal_norm_max_c': LEGACY_THERMAL_NORM_MAX_C,
+        'thermal_norm_source': 'assumed_legacy_default',
+    }
+
+
 def _check_upload_token(header_token: str, form_token: str) -> None:
     """Reject the request unless it carries the shared secret. Accepts it either as the
     X-Upload-Token header or as a `token` multipart field: the Pi's SIM800 sets custom
@@ -70,6 +103,8 @@ async def upload(
     thermal_min_c: str = Form(""),
     thermal_max_c: str = Form(""),
     thermal_avg_c: str = Form(""),
+    thermal_norm_min_c: str = Form(""),
+    thermal_norm_max_c: str = Form(""),
 ):
     _check_upload_token(x_upload_token, token)
 
@@ -101,6 +136,7 @@ async def upload(
                 'thermal_min_c': thermal_min_c,
                 'thermal_max_c': thermal_max_c,
                 'thermal_avg_c': thermal_avg_c,
+                **_thermal_norm_fields(thermal_norm_min_c, thermal_norm_max_c),
             }))
             background_tasks.add_task(_align_new_capture, THERMAL_DIR / thermal_file, stem, timestamp)
         else:
