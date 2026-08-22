@@ -80,6 +80,24 @@ This file records what was tried, what was changed, and why. It is the most impo
 
 ---
 
+### Thermal frames travel at sensor resolution instead of stretched into an alpha channel
+
+**Decision:** The Pi sends the thermal frame as its own `thermal` part of the same upload POST, at the sensor's native 80×62, and the server stores it that way. `POST /upload` accepts either that or the previous RGBA-fused WebP; the recorder picks by `thermal_native_transport` (default on). `align_thermal` maps whatever resolution it finds onto the calibration reference via `homography @ scale_to_reference(...)`, so both formats align with the same saved profile.
+
+**Why it worked:** the fusion existed to make the pair unsplittable — one file, no timestamp matching, no chance of mismatched RGB and thermal. But WebP alpha must match the image dimensions, so fusing *forced* an upsample from 80×62 (4,960 samples) to 1920×1080 (2,073,600). Measured cost: **40.8 KB of every ~118 KB upload, 34%, to carry 1.8 KB of actual measurement** — over a GSM link with a 293 KB hard cap. Sending it as a second part of the same multipart body keeps the atomicity (still one POST, still unsplittable) at 1/23rd the bytes.
+
+Three findings shaped the design:
+
+- **PNG beats raw.** A raw 80×62 uint8 array is 4,960 B; the same frame as PNG is 1,729 B, because thermal fields are spatially smooth and PNG's row filtering predicts them well. "Just send the numbers" is the *larger* option, and a bare zlib stream (2,180 B) still loses to PNG despite skipping the container.
+- **No recalibration needed.** The native→stretched map is a pure scaling, so the existing homography carries over as `H @ S`. Verified against the old path: a warm blob lands within **0.21 px** of where the three-resample pipeline put it, and the composed transform's diagonal ratio drops from 1.342 to 1.028 — i.e. the old calibration was mostly absorbing an anisotropy the pipeline itself introduced (24.0× horizontal vs 17.4× vertical). A near-similarity is what two rigidly mounted cameras should produce, which also makes a future bad fit diagnosable.
+- **8-bit is sufficient.** PNG-16 at centi-°C costs 3,053 B for 13.7× finer quantization, but only 0.1% of 9,926 archive frames clip the 10–45 °C window at all, and a rodent against background spans ~109 of the 256 levels. Not worth 1.3 KB per capture.
+
+**Trade-off:** two capture formats now exist. The 9,931 existing `upsampled_rgb` frames keep working unchanged — `align_thermal` handles both by the same rule — but any consumer reasoning about resolution has to read `thermal_geometry` rather than assume. `is_thermal_frame_corrupted` also had to be re-based onto the sensor grid, since its threshold was tuned on upsampled frames and read 60% of native frames as corrupt; the new scorer agrees with the old on 99.7% of 1,200 archive frames. Output is now always at the calibration reference size, so frames the uploader had shrunk to fit the modem buffer (~24% of the archive, at 1440×810) produce 1920×1080 aligned output instead of 1440×810 — uniform, but a change for anything that assumed aligned output matched its input size.
+
+**Not fixed by this:** the single-resample path is *not* sharper — measured +0.6% edge energy, within noise. The final warp is a ~15.9× upscale either way, so output detail is bounded by the sensor, not by how many times the data was resampled. The gain here is bandwidth and correctness, not image quality.
+
+---
+
 ### Thermal frames record the normalization window they were encoded with
 
 **Decision:** The capture sidecar now carries `thermal_norm_min_c`/`thermal_norm_max_c` — the fixed °C window the 0-255 pixel values were actually encoded against — plus `thermal_norm_source` (`reported` when the device sent it, `assumed_legacy_default` when the server filled in 10–45 °C for an older client). The Pi writes the window in `_write_sidecar`, the uploader passes it through its form-field whitelist, and `POST /upload` persists it.

@@ -56,6 +56,7 @@ Receive an image from a field device.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `image` | file | yes | JPEG, PNG, or WebP. WebP is converted to JPEG on receipt. Thermal-fused RGBA WebP is split — see Notes. |
+| `thermal` | file | no | The thermal frame at the sensor's own resolution (80×62 PNG, ~1.8 KB). Preferred over the RGBA-fused form; when present it wins and the `image` part is treated as an ordinary visible frame. Stored under the visible frame's stem, never the part's own filename. |
 | `device_id` | text | no | Identifier of the sending device |
 | `mode` | text | no | `image_motion` or `image_interval` |
 | `motion_score` | text | no | Motion ratio that triggered capture (float as string) |
@@ -75,11 +76,14 @@ Receive an image from a field device.
 **Side effects:**
 - Saves image to `uploads/<filename>`.
 - Appends a row to `upload_log.txt`.
-- If the uploaded WebP has an alpha channel (thermal-fused frame): saves the alpha channel to
+- If a `thermal` part is present (native transport) **or** the uploaded WebP has an alpha channel
+  (legacy fused frame): saves the thermal frame to
   `thermal/<stem>_thermal.png` and writes `thermal/<stem>_thermal.json` with `source_image`,
-  `device_id`, `timestamp`, the `thermal_min_c`/`max_c`/`avg_c` values, and the encoding window
+  `device_id`, `timestamp`, the `thermal_min_c`/`max_c`/`avg_c` values, the encoding window
   as `thermal_norm_min_c`/`thermal_norm_max_c` plus a `thermal_norm_source` of `reported` (the
-  device sent it) or `assumed_legacy_default` (it didn't, so 10–45 °C was filled in).
+  device sent it) or `assumed_legacy_default` (it didn't, so 10–45 °C was filled in), and
+  `thermal_geometry` — `native_sensor` for an 80×62 frame, `upsampled_rgb` for one stretched to
+  the visible frame's size — alongside the actual `thermal_width`/`thermal_height`.
 
   **Decoding a thermal frame to temperature** uses the *norm* window, never the observed one:
 

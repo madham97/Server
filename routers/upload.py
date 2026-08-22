@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, UploadFile, File, Form, Header, 
 from PIL import Image as PILImage
 
 from config import THERMAL_DIR, UPLOAD_DIR, UPLOAD_LOG, UPLOAD_TOKEN
-from thermal_align import align_thermal, find_profile_for_timestamp
+from thermal_align import SENSOR_FRAME_SIZE, align_thermal, find_profile_for_timestamp
 
 router = APIRouter()
 
@@ -93,6 +93,7 @@ def _check_upload_token(header_token: str, form_token: str) -> None:
 async def upload(
     background_tasks: BackgroundTasks,
     image: UploadFile = File(None),
+    thermal: UploadFile = File(None),
     token: str = Form(""),
     x_upload_token: str = Header(None),
     device_id: str = Form(""),
@@ -113,32 +114,47 @@ async def upload(
 
     data = await image.read()
     thermal_file = None
+    thermal_bytes = await thermal.read() if thermal is not None else b''
+
+    def store_thermal(stem: str, source_filename: str, frame: PILImage.Image) -> str:
+        """Write the thermal frame and its sidecar, whichever transport it arrived by."""
+        THERMAL_DIR.mkdir(exist_ok=True)
+        name = stem + '_thermal.png'
+        frame.save(THERMAL_DIR / name, format='PNG', optimize=True)
+        (THERMAL_DIR / (stem + '_thermal.json')).write_text(json.dumps({
+            'source_image':  source_filename,
+            'device_id':     device_id,
+            'timestamp':     timestamp,
+            'thermal_min_c': thermal_min_c,
+            'thermal_max_c': thermal_max_c,
+            'thermal_avg_c': thermal_avg_c,
+            # Which grid the pixels are on. Alignment reads the real dimensions off the file, so
+            # this is for consumers that need to know whether they're looking at sensor samples
+            # or an interpolation of them — the difference between ~4,960 measurements and
+            # 2,073,600 values derived from them.
+            'thermal_geometry': ('native_sensor' if frame.size == SENSOR_FRAME_SIZE
+                                 else 'upsampled_rgb'),
+            'thermal_width':  frame.size[0],
+            'thermal_height': frame.size[1],
+            **_thermal_norm_fields(thermal_norm_min_c, thermal_norm_max_c),
+        }))
+        background_tasks.add_task(_align_new_capture, THERMAL_DIR / name, stem, timestamp)
+        return name
 
     if image.filename.lower().endswith('.webp'):
         img = PILImage.open(io.BytesIO(data))
         stem = Path(image.filename).stem
 
-        if 'A' in img.getbands():
-            # Thermal-fused frame: separate the visible RGB from the thermal alpha channel.
+        if 'A' in img.getbands() and not thermal_bytes:
+            # Legacy thermal-fused frame: the thermal map rides in the alpha channel, upsampled
+            # to the visible frame's size because WebP alpha has to match it. Split them back
+            # apart. Superseded by the `thermal` part below, which skips the upsample entirely.
             rgba = img.convert('RGBA')
             buf = io.BytesIO()
             rgba.convert('RGB').save(buf, format='JPEG', quality=95)
             data = buf.getvalue()
             filename = stem + '.jpg'
-
-            THERMAL_DIR.mkdir(exist_ok=True)
-            thermal_file = stem + '_thermal.png'
-            rgba.getchannel('A').save(THERMAL_DIR / thermal_file, format='PNG')
-            (THERMAL_DIR / (stem + '_thermal.json')).write_text(json.dumps({
-                'source_image':  filename,
-                'device_id':     device_id,
-                'timestamp':     timestamp,
-                'thermal_min_c': thermal_min_c,
-                'thermal_max_c': thermal_max_c,
-                'thermal_avg_c': thermal_avg_c,
-                **_thermal_norm_fields(thermal_norm_min_c, thermal_norm_max_c),
-            }))
-            background_tasks.add_task(_align_new_capture, THERMAL_DIR / thermal_file, stem, timestamp)
+            thermal_file = store_thermal(stem, filename, rgba.getchannel('A'))
         else:
             buf = io.BytesIO()
             img.save(buf, format='JPEG', quality=95)
@@ -152,6 +168,21 @@ async def upload(
         filename = Path(image.filename or '').name
         if not filename:
             raise HTTPException(status_code=422, detail="Invalid filename")
+
+    if thermal_bytes:
+        # Native transport: the thermal frame arrives as its own part at the sensor's real
+        # resolution instead of stretched into the visible frame's alpha channel. Same POST, so
+        # the two still can't be mispaired, but ~1.8KB instead of ~40KB over the modem link.
+        # The stored name is derived from the visible frame's stem, never from the part's own
+        # filename, so a hostile name can't escape THERMAL_DIR.
+        try:
+            frame = PILImage.open(io.BytesIO(thermal_bytes))
+            frame.load()
+        except Exception:
+            raise HTTPException(status_code=422, detail="Thermal part is not a readable image")
+        if frame.mode != 'L':
+            frame = frame.convert('L')
+        thermal_file = store_thermal(Path(filename).stem, filename, frame)
 
     (UPLOAD_DIR / filename).write_bytes(data)
 
