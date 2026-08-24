@@ -22,3 +22,9 @@ __pycache__/
 upload_log.txt
 processed_log.txt
 annotation_log.txt
+# Published client update bundles. Build artifacts, not source: a new ~68KB tarball is written
+# on every publish, and each would live in history forever. Provenance is already exact without
+# them — Rodent-client commit 8b5822b matches 20260824T074110Z.tgz byte for byte, verified at
+# publish time — so the source repo is the record of what shipped, not this directory.
+client_updates/*.tgz
+client_updates_archive/
