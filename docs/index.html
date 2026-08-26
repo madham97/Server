@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="SENTINEL-RAT — continuous rodent monitoring at Heidelberg Zoo. Field captures and workshop material.">
+<meta name="color-scheme" content="light dark">
+<title>SENTINEL-RAT</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;1,400&display=swap">
+<style>
+:root{
+  --ground:#f4f6fb; --panel:#ffffff; --edge:#dbe0ee;
+  --ink:#101528; --ink-2:#3d4560; --ink-3:#6a7189;
+  --cool:#2f56c6; --warm:#e0431d; --ember:#c76a05;
+  --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --serif:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+  --mono:"IBM Plex Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#080b16; --panel:#111726; --edge:#242c42;
+    --ink:#eef1f8; --ink-2:#b3bbd0; --ink-3:#7d879f;
+    --cool:#6f92ee; --warm:#ff7a54; --ember:#f0a03a;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#080b16; --panel:#111726; --edge:#242c42;
+  --ink:#eef1f8; --ink-2:#b3bbd0; --ink-3:#7d879f;
+  --cool:#6f92ee; --warm:#ff7a54; --ember:#f0a03a;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--sans); font-size:16px; line-height:1.6;
+  -webkit-text-size-adjust:100%;
+}
+.wrap{max-width:680px; margin:0 auto; padding:44px 18px 64px; display:flex; flex-direction:column; gap:30px}
+.eyebrow{
+  font-family:var(--mono); font-size:11.5px; letter-spacing:.18em; text-transform:uppercase;
+  color:var(--ink-3);
+}
+h1{
+  font-weight:600; font-size:clamp(30px,8vw,42px); line-height:1.1;
+  letter-spacing:-.022em; margin:0; text-wrap:balance;
+}
+.standfirst{
+  font-family:var(--serif); font-size:17px; line-height:1.65; color:var(--ink-2);
+  margin:0; max-width:60ch;
+}
+.ramp{
+  height:12px; border-radius:3px; border:1px solid var(--edge);
+  background:linear-gradient(90deg,#080e3c 0%,#1a2e96 16%,#3c60d2 34%,#8c5cbe 50%,#d03e80 64%,#f04234 78%,#fc9820 90%,#fff4c8 100%);
+}
+.links{display:flex; flex-direction:column; gap:14px}
+a.tile{
+  display:flex; flex-direction:column; gap:6px; text-decoration:none;
+  background:var(--panel); border:1px solid var(--edge); border-radius:10px;
+  padding:20px 22px; color:inherit; transition:border-color .15s ease, transform .15s ease;
+}
+a.tile:hover{border-color:var(--ember); transform:translateY(-1px)}
+a.tile:focus-visible{outline:2px solid var(--ember); outline-offset:3px}
+a.tile .name{font-size:18px; font-weight:600; letter-spacing:-.01em; color:var(--ink)}
+a.tile .desc{font-size:14.5px; color:var(--ink-2); line-height:1.5}
+a.tile .meta{
+  font-family:var(--mono); font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--ink-3); margin-top:2px;
+}
+footer{
+  font-family:var(--mono); font-size:11.5px; color:var(--ink-3); line-height:1.7;
+  border-top:1px solid var(--edge); padding-top:16px;
+}
+footer a{color:var(--cool)}
+@media (prefers-reduced-motion:reduce){ a.tile{transition:none} a.tile:hover{transform:none} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header style="display:flex;flex-direction:column;gap:13px">
+    <div class="eyebrow">Heidelberg Zoo · Scientific Software Centre</div>
+    <h1>SENTINEL-RAT</h1>
+    <div class="ramp" role="img" aria-label="Colour scale from deep blue for cool surfaces to near-white for warm ones"></div>
+    <p class="standfirst">A camera in a rodent enclosure photographs whatever moves and, alongside
+    each photograph, records a map of surface temperature. The aim is to read rodent activity
+    continuously — without traps — as an early signal of disease risk.</p>
+  </header>
+
+  <div class="links">
+    <a class="tile" href="gallery.html">
+      <span class="name">Reading heat in a rat enclosure</span>
+      <span class="desc">Real captures from the enclosure: the photograph and the temperature map
+      side by side, with the temperatures measured from each frame. Where heat imaging settles a
+      question the photograph cannot — and the afternoon where it inverts.</span>
+      <span class="meta">field captures · best on a phone</span>
+    </a>
+    <a class="tile" href="workshop-presentation.html">
+      <span class="name">Workshop presentation</span>
+      <span class="desc">The full talk: why rodents matter for spillover, how the camera and the
+      retraining loop work, what the detector achieves so far, and what it still gets wrong.</span>
+      <span class="meta">17 slides · arrow keys to navigate · P to save as PDF</span>
+    </a>
+  </div>
+
+  <footer>
+    Captures: Heidelberg Zoo rodent enclosure, 2026 · one device<br>
+    Source: <a href="https://github.com/madham97/Server">github.com/madham97/Server</a>
+  </footer>
+</div>
+</body>
+</html>
