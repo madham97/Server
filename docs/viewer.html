@@ -90,8 +90,6 @@ button.nav:focus-visible{outline:2px solid var(--ember); outline-offset:3px}
 .chip.hot{border-color:color-mix(in srgb,var(--warm) 45%,var(--edge)); color:var(--warm)}
 .chip.cold{border-color:color-mix(in srgb,var(--cool) 45%,var(--edge)); color:var(--cool)}
 .chip.flat{border-style:dashed}
-.caption{font-size:14px; line-height:1.5; color:var(--ink-2)}
-.caption b{color:var(--ink); font-weight:600}
 
 /* ---------- ramp ---------- */
 .ramp{display:flex; flex-direction:column; gap:6px}
@@ -161,7 +159,6 @@ footer a{color:var(--cool)}
         <button class="nav" id="btnNext" type="button" aria-label="Next capture">&#8594;</button>
       </div>
       <div class="readout" id="readout"></div>
-      <p class="caption" id="caption"></p>
     </div>
   </div>
 
@@ -212,7 +209,7 @@ const DATA = [{"id":"image_20260803T045725Z","time":"04:57","date":"2026-08-03",
 
 const el = id => document.getElementById(id);
 const photo = el('layerPhoto'), heat = el('layerHeat'), boxSvg = el('boxes');
-const mix = el('mix'), badge = el('badge'), readout = el('readout'), caption = el('caption');
+const mix = el('mix'), badge = el('badge'), readout = el('readout');
 const strip = el('strip');
 let idx = 0, pix = false, showBoxes = false, filter = 'all';
 
@@ -223,17 +220,6 @@ function visible(){
 function fmt(d){ return (d > 0 ? '+' : d < 0 ? '−' : '±') + Math.abs(d).toFixed(1); }
 function cls(d){ return d >= 2 ? 'hot' : d <= -0.5 ? 'cold' : 'flat'; }
 
-const CAPTIONS = {
-  'image_20260820T065328Z': 'Before dawn on cold boards. In the photograph the animal is a smudge in shadow; in the heat map there is nothing to argue about.',
-  'image_20260802T054057Z': 'A rat at the feeding bowl in the early morning, clearly warmer than the bedding around it.',
-  'image_20260803T045725Z': 'A person, not a rat. Hands are warm too — what separates them is size and shape, not temperature.',
-  'image_20260809T140317Z': 'A keeper reaching into the enclosure in the early afternoon. Against warm surroundings even hands barely register.',
-  'image_20260807T164155Z': 'Two animals, and only one of them stands out. The second is barely warmer than the ground.',
-  'image_20260815T161245Z': 'Mid-afternoon, and the contrast has reversed: bedding that has been in the sun is warmer than the animals sitting on it.',
-  'image_20260806T175711Z': 'Early evening at the bowl. As the enclosure cools, animals separate from the background again.',
-  'image_20260807T181230Z': 'Two animals at the bowl, each separately visible — the case this method was hoped for.',
-  'image_20260812T182732Z': 'A warm evening. Both animals are found in the photograph, but the heat map adds almost nothing here.'
-};
 
 function render(){
   const list = visible();
@@ -256,7 +242,6 @@ function render(){
   readout.innerHTML =
     `<span class="chip">surroundings <b>${c.bg.toFixed(1)} °C</b></span>` +
     c.boxes.map(b => `<span class="chip ${cls(b.d)}">${b.c} <b>${fmt(b.d)} °C</b></span>`).join('');
-  caption.textContent = CAPTIONS[c.id] || '';
 
   [...strip.children].forEach(btn =>
     btn.setAttribute('aria-current', String(btn.dataset.id === c.id)));
