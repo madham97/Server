@@ -55,11 +55,18 @@ Receive an image from a field device.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `image` | file | yes | JPEG, PNG, or WebP. WebP is converted to JPEG on receipt. |
+| `image` | file | yes | JPEG, PNG, or WebP. WebP is converted to JPEG on receipt. Thermal-fused RGBA WebP is split — see Notes. |
+| `thermal` | file | no | The thermal frame at the sensor's own resolution (80×62 PNG, ~1.8 KB). Preferred over the RGBA-fused form; when present it wins and the `image` part is treated as an ordinary visible frame. Stored under the visible frame's stem, never the part's own filename. |
 | `device_id` | text | no | Identifier of the sending device |
 | `mode` | text | no | `image_motion` or `image_interval` |
 | `motion_score` | text | no | Motion ratio that triggered capture (float as string) |
 | `timestamp` | text | no | ISO 8601 capture time |
+| `format` | text | no | Format hint sent by the Pi (currently informational only, not read by the server) |
+| `thermal_min_c` | text | no | Minimum temperature (°C) in the thermal frame, if `image` is a thermal-fused RGBA WebP |
+| `thermal_max_c` | text | no | Maximum temperature (°C) in the thermal frame, if `image` is a thermal-fused RGBA WebP |
+| `thermal_avg_c` | text | no | Average temperature (°C) in the thermal frame, if `image` is a thermal-fused RGBA WebP |
+| `thermal_norm_min_c` | text | no | Lower bound of the fixed °C window the frame's 0-255 pixel values were encoded against |
+| `thermal_norm_max_c` | text | no | Upper bound of that window. Sent together with `thermal_norm_min_c` or not at all |
 
 **Response**
 ```json
@@ -69,6 +76,36 @@ Receive an image from a field device.
 **Side effects:**
 - Saves image to `uploads/<filename>`.
 - Appends a row to `upload_log.txt`.
+- If a `thermal` part is present (native transport) **or** the uploaded WebP has an alpha channel
+  (legacy fused frame): saves the thermal frame to
+  `thermal/<stem>_thermal.png` and writes `thermal/<stem>_thermal.json` with `source_image`,
+  `device_id`, `timestamp`, the `thermal_min_c`/`max_c`/`avg_c` values, the encoding window
+  as `thermal_norm_min_c`/`thermal_norm_max_c` plus a `thermal_norm_source` of `reported` (the
+  device sent it) or `assumed_legacy_default` (it didn't, so 10–45 °C was filled in), and
+  `thermal_geometry` — `native_sensor` for an 80×62 frame, `upsampled_rgb` for one stretched to
+  the visible frame's size — alongside the actual `thermal_width`/`thermal_height`.
+
+  **Decoding a thermal frame to temperature** uses the *norm* window, never the observed one:
+
+  ```
+  temp_c = thermal_norm_min_c + (pixel / 255) * (thermal_norm_max_c - thermal_norm_min_c)
+  ```
+
+  `thermal_min_c`/`max_c`/`avg_c` are the frame's observed range and are telemetry only —
+  decoding against them rescales every frame by a different factor, which is the exact failure
+  the fixed-window normalization exists to prevent. Values that fell outside the window at
+  capture time were clipped and cannot be recovered (measured at ~0.1% of frames).
+- If a thermal frame was split out **and** a calibration is currently saved
+  (`calibration/homography.json`), schedules a background task that warps the new thermal
+  frame with the saved homography and writes `thermal/<stem>_thermal_aligned.png`. Runs after
+  the response is returned (`BackgroundTasks`), so it doesn't add latency to the upload
+  request. Silently does nothing if no calibration has been saved yet.
+
+**Notes:**
+- Thermal-fused frames arrive as RGBA WebP: visible image in RGB, normalized thermal map in
+  alpha. JPEG can't hold alpha, so the RGB and thermal channel are split and saved separately.
+  `thermal/` is a sibling of `uploads/`, not a subdirectory, so the background watcher (which
+  only reads `uploads/`) never sees thermal files.
 
 ---
 
@@ -320,3 +357,173 @@ Run inference on a random sample of images from `uploads/`. Useful for verifying
 **Notes:**
 - This endpoint does NOT update `processed_log.txt` — it's a test endpoint. The same images can be processed again by the background watcher.
 - Results are saved to `processed/` the same way as the background watcher.
+
+---
+
+## Utilities
+
+### `GET /thermal?start=&end=&page=1&per_page=24`
+Browse RGB/thermal capture pairs side by side, newest first. Read-only, no side effects.
+
+**Query params**
+
+| Param | Default | Description |
+|---|---|---|
+| `start` | — | Inclusive earliest capture date, `YYYY-MM-DD`, UTC. **400** if unparseable |
+| `end` | — | Inclusive latest capture date, `YYYY-MM-DD`, UTC. **400** if unparseable |
+| `hour_start` | — | Inclusive first UTC hour-of-day, `0`–`23`. **400** if out of range |
+| `hour_end` | — | Inclusive last UTC hour-of-day, `0`–`23`. **400** if out of range |
+| `page` | `1` | 1-based page number; clamped to the last page that exists |
+| `per_page` | `24` | Cards per page, clamped to 1–200 |
+| `limit` | — | Legacy alias for `per_page`, kept so older links keep working |
+
+`hour_start`/`hour_end` select an hour-of-day window that applies within the date range, and it **wraps through midnight** when `hour_start > hour_end` — `hour_start=18&hour_end=6` means the night (18:00–23:59 plus 00:00–06:59), not the empty set. Wrapping is the normal case here, since the animals are nocturnal and the interesting window always straddles 00:00. Giving only one bound leaves the other at the edge of the day.
+
+Date and hour filtering read the capture time out of the sidecar **filename** (`..._YYYYMMDDTHHMMSSZ_thermal.json`), not the JSON body, so filtering ten thousand captures doesn't open ten thousand files. A sidecar whose name doesn't carry a parseable timestamp can't be placed on the timeline and is excluded whenever either date bound is set (it still shows up unfiltered).
+
+**Response:** HTML page. Each thermal sidecar in `thermal/` is matched to its source JPEG (via the sidecar's `source_image` field) and rendered as a card with both images, `device_id`, `timestamp`, and the min/max/avg °C range. If the source JPEG no longer exists in `uploads/` (e.g. deleted for disk space), that side shows a "rgb missing" placeholder instead of a broken image.
+
+A **"show thermal at true sensor resolution"** toggle at the top of the page (or the `n` key) switches every thermal image — thumbnails and lightbox — to `?native=1` with pixelated rendering, so the display stops implying detail the 80×62 sensor never captured. The choice persists in `localStorage` across paging.
+
+Clicking any image on a card opens a full-size **overlay lightbox** — the aligned thermal composited over the RGB with an opacity slider, the same comparison the calibration page shows for a single capture. `←`/`→` step through the cards on the current page, `↑`/`↓` nudge opacity, `s` swaps the overlay between the aligned thermal and the raw (unaligned) thermal frame, `esc` closes. Captures with no aligned counterpart yet open with the raw thermal and a "not aligned yet" note; captures with no RGB show the thermal alone.
+
+---
+
+### `GET /client-update/manifest?device_id=`
+What client bundle is currently published, so a device can tell whether it already has it. Kept tiny — devices poll this far more often than they download, and every byte crosses a ~1.8 KB/s GSM link.
+
+**Response:** `{ "version", "sha256", "size", "encoded_size" }`, or `{ "version": null }` if nothing is published. `sha256` is of the **decoded** bundle, so a device verifies what it will install rather than the wire form.
+
+---
+
+### `GET /client-update/bundle?device_id=`
+The published bundle, **base64-encoded** as `text/plain`. **404** if nothing is published.
+
+Base64 rather than raw bytes because devices fetch through a 2G modem's `AT+HTTPREAD`, which returns the payload across a serial link as text. The 33% overhead (~52 KB → ~71 KB, roughly 7 extra seconds) buys immunity to that transport.
+
+Publishing is a file drop: the newest `.tgz` in `client_updates/` wins, so deleting one rolls the fleet back to the previous. Build bundles with `scripts/build-update-bundle.sh` in the `Rodent-client` repo. The directory is bind-mounted in `docker-compose.yml`, so publishing needs no rebuild.
+
+---
+
+### `GET /thermal/image/{name}?native=`
+Serve a raw thermal PNG from `thermal/`. Used by the `/thermal` page; `name` is validated to resolve inside `thermal/` before serving.
+
+**Query params**
+
+| Param | Default | Description |
+|---|---|---|
+| `native` | `false` | Return the frame on the sensor's own 80×62 grid rather than the interpolated form it is stored in |
+
+`native=1` exists because every capture before native transport was upsampled on the device from 80×62 to the visible frame's size, and that upsample added no information — reducing it back recovers the sensor samples to within ~0.09 gray levels (0.013 °C), measured. Serving the small image and letting the browser scale it with `image-rendering: pixelated` shows the real measurement grid: **4,960 samples, not the 2 million values a smooth 1920×1080 render implies**.
+
+The two cases differ:
+
+- A **raw** frame is reduced with `INTER_AREA` (averaging each output cell over the block it came from inverts the device's cubic upsample; point-sampling would keep whichever interpolated value happened to land there). Frames already stored natively are served unchanged.
+- An **aligned** frame can't just be reduced — warping moved the content into RGB coordinates, so its rows no longer line up with sensor cells. It is re-warped from the native grid with `INTER_NEAREST` at the calibration reference size, giving one flat block per sensor cell (measured median run 16 px against a predicted 15.8 px). Falls back to the stored frame if the raw frame or a covering calibration profile is missing.
+
+**Response:** image file (PNG). **404** if the name doesn't resolve inside `thermal/` or the file doesn't exist.
+
+---
+
+## Thermal Calibration
+
+Computes and applies the thermal-to-RGB homography (`thermal_align.py`, `routers/thermal_calibrate.py`). Calibration is stored as a list of **profiles** in `calibration/profiles.json`, not a single transform — each profile carries a `[effective_from, effective_until)` window (an ISO timestamp and either another ISO timestamp or `null` for open-ended), and a capture is aligned using whichever profile's window contains *that capture's own* timestamp (`find_profile_for_timestamp`), not necessarily the newest profile. This is what lets the camera be recalibrated after being physically moved without corrupting the alignment of footage captured before the move — old captures keep using the profile that was actually in effect when they were taken.
+
+On first read, if `calibration/profiles.json` doesn't exist yet but the old single-file `calibration/homography.json` does, it's migrated into one profile covering all time (`effective_from` the Unix epoch, open-ended) — an existing deployment's calibration keeps working unchanged until a real recalibration creates a second, time-scoped profile.
+
+Consumed by `align_thermal`/`align_all` and by the background alignment task on `/upload` (see above), both of which resolve each capture's applicable profile independently.
+
+### `GET /thermal/calibrate`
+Serves the calibration UI (`static/thermal_calibrate.html`) — draw matching boxes around the animal on RGB/thermal pairs, or trigger automatic calibration, against a chosen effective window.
+
+---
+
+### `GET /thermal/calibrate/candidates?limit=200`
+List capture pairs available to calibrate against.
+
+**Response:** JSON array of `{ stem, source_image, timestamp, device_id }`, newest first, excluding any capture whose thermal frame is flagged as a corrupted SPI/CRC read (see `is_thermal_frame_corrupted`) or whose RGB/thermal file is missing.
+
+---
+
+### `GET /thermal/calibrate/profiles`
+List all saved calibration profiles, newest `effective_from` first.
+
+**Response:** JSON array of `{ id, label, effective_from, effective_until, calibrated_at, method, point_count, inlier_count }`.
+
+---
+
+### `DELETE /thermal/calibrate/profiles/{profile_id}`
+Delete a calibration profile. Captures whose timestamp falls in its window are left with whatever aligned file they already have — they become unaligned only once something re-runs `align_all` and finds no profile covers them anymore. **404** if the id doesn't exist.
+
+---
+
+### `POST /thermal/calibrate`
+Fit a homography from manually-clicked point pairs (at least 4), saved as a calibration profile.
+
+**Body**
+```json
+{
+  "pairs": [{ "stem": "...", "rgb": [x, y], "thermal": [x, y] }, ...],
+  "effective_from": "2026-08-01T00:00:00Z",
+  "effective_until": null,
+  "profile_id": null,
+  "label": "",
+  "preview_stem": "..."
+}
+```
+`effective_from` is required. `effective_until` defaults to `null` (open-ended). `profile_id`, if given, edits that existing profile in place (new homography, same id, window can also change) instead of creating a new one — validated against every *other* profile's window either way.
+
+**Response:** `{ status, profile_id, point_count, image_count, aligned_count, preview, points }` — `points` includes per-pair reprojection error (`error_px`) and RANSAC inlier status, worst first.
+
+**Errors:** `400` if the effective window overlaps another existing profile's window, or the usual point-count/homography-estimation failures.
+
+**Side effects:** saves the profile and re-aligns every capture whose applicable profile is this one (`align_all(force=True, profile_id=...)`) — not every file in `thermal/`, only the ones this profile actually governs.
+
+---
+
+### `POST /thermal/calibrate/boxes`
+Fit an affine transform from matched bounding boxes (at least 3) — the box's center **and** size both constrain the fit, which tolerates imprecise drawing far better than clicking a single point on a blurry thermal blob. This is what the calibration UI actually uses. Same profile semantics as above.
+
+**Body**
+```json
+{
+  "pairs": [{ "stem": "...", "rgb": [x1,y1,x2,y2], "thermal": [x1,y1,x2,y2] }, ...],
+  "effective_from": "2026-08-01T00:00:00Z",
+  "effective_until": null,
+  "profile_id": null,
+  "label": "",
+  "preview_stem": "..."
+}
+```
+
+**Response:** `{ status, profile_id, point_count, image_count, aligned_count, preview, boxes }` — `boxes` includes IoU between the transformed thermal box and the RGB box, and inlier status, worst first.
+
+**Errors / side effects:** same as `POST /thermal/calibrate`.
+
+---
+
+### `POST /thermal/calibrate/auto`
+Extracts correspondences automatically via background subtraction — no manual clicking. For every capture, finds the centroid of whatever stands out most from a per-pixel background reference in each spectrum independently, keeps the frame only if both sides found one plausible blob, and fits an affine transform (`cv2.estimateAffine2D` + RANSAC) through the pooled centroids. Same profile semantics as the point/box endpoints.
+
+**Body**
+```json
+{ "effective_from": "2026-08-01T00:00:00Z", "effective_until": null, "profile_id": null, "label": "" }
+```
+
+**Response:** `{ status, profile_id, point_count, pairs_considered, pairs_matched, aligned_count, points }`.
+
+**Errors:** `400` if fewer than `min_pairs` (default 8) capture pairs are available, share a common resolution, or produce a usable blob on both sides; if the RANSAC fit's inlier ratio is below 30% (the fit is rejected outright rather than saved, to avoid silently calibrating from noise); or if the effective window overlaps another profile's.
+
+**Side effects:** same as the point/box endpoints.
+
+---
+
+### `GET /thermal/calibrate/stats?profile_id=&at=`
+Fit summary for one calibration profile. With neither param, defaults to whichever profile covers right now; `at` (an ISO timestamp) checks a different moment instead; `profile_id` looks up a specific profile directly regardless of its window. Use `GET /thermal/calibrate/profiles` to see all of them.
+
+**Response:** as before, plus `id`, `label`, `effective_from`, `effective_until`. **404** if no profile matches.
+
+---
+
+### `GET /config-help`
+Interactive page for building `SET key=value key=value ...` SMS commands to text to the Pi's SIM number, per the SMS remote-configuration protocol in `docs/stakeholder-project-guide.md`. No request params; entirely client-side JS, no backend state.

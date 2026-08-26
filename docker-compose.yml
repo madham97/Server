@@ -3,11 +3,24 @@ services:
     build: .
     ports:
       - "8000:8000"
+    environment:
+      # Shared secret for POST /upload. Set it in a .env file next to this compose file
+      # (UPLOAD_TOKEN=...) and give the Pi the same value as "upload_token" in client.json.
+      # Left empty the endpoint is unauthenticated — see README.
+      - UPLOAD_TOKEN=${UPLOAD_TOKEN:-}
     volumes:
       - ./models:/app/models
       - ./uploads:/app/uploads
+      - ./thermal:/app/thermal
+      - ./calibration:/app/calibration
+      # Update bundles published to the field devices. Mounted so a new bundle can be dropped in
+      # without rebuilding the image — the whole point is shipping code without touching hardware.
+      - ./client_updates:/app/client_updates
       - ./processed:/app/processed
       - ./annotated:/app/annotated
       - ./failed:/app/failed
       - ./dataset:/app/dataset
+      - ./upload_log.txt:/app/upload_log.txt
+      - ./processed_log.txt:/app/processed_log.txt
+      - ./annotation_log.txt:/app/annotation_log.txt
     restart: unless-stopped

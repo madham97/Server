@@ -16,9 +16,11 @@ from config import (
     MODEL_WEIGHTS,
     MODEL_CONF,
     MODEL_IOU,
+    UPLOAD_TOKEN,
 )
 import state
-from routers import upload, annotate, export, train, infer
+from routers import (upload, annotate, export, train, infer, config_help, thermal_view,
+                     thermal_calibrate, client_update)
 
 UPLOAD_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
@@ -31,6 +33,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 async def lifespan(app: FastAPI):
     state._processed = state.load_processed_log()
     logging.info(f'Loaded {len(state._processed)} entries from processed log')
+    if UPLOAD_TOKEN:
+        logging.info('POST /upload requires a shared secret (UPLOAD_TOKEN is set)')
+    else:
+        logging.warning(
+            'UPLOAD_TOKEN is not set — POST /upload accepts writes from anyone who can reach '
+            'it. Safe only while this server has no public route; set UPLOAD_TOKEN before '
+            'forwarding a public port or exposing a tunnel URL.'
+        )
     asyncio.create_task(watch_uploads())
     logging.info('Background upload watcher started')
     yield
@@ -42,6 +52,10 @@ app.include_router(annotate.router)
 app.include_router(export.router)
 app.include_router(train.router)
 app.include_router(infer.router)
+app.include_router(config_help.router)
+app.include_router(thermal_view.router)
+app.include_router(thermal_calibrate.router)
+app.include_router(client_update.router)
 
 
 @app.get("/health")

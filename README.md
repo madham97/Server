@@ -35,7 +35,7 @@ Requires Docker. Model weights (`models/best.pt`) must be copied to the server m
 # On the server — first time setup
 git clone -b <branch> https://github.com/madham97/Server.git ~/Server
 cd ~/Server
-mkdir -p models uploads processed annotated failed dataset
+mkdir -p models uploads processed annotated failed dataset thermal
 
 # Copy model weights from local machine
 scp /path/to/models/best.pt user@<server-ip>:~/Server/models/
@@ -59,6 +59,30 @@ Stop cleanly:
 docker compose down
 ```
 
+#### Browser access via SSH port forwarding (preferred)
+
+For reaching the web UI (`/thermal/calibrate`, `/thermal`, `/annotate`, `/config-help`) from your own machine, **use an SSH tunnel rather than ngrok**. It needs no account, has no bandwidth cap, requires nothing installed or running on the server beyond sshd, and sidesteps the HSTS problem described below entirely.
+
+Run this on your **local machine**, not on the server:
+```bash
+ssh -N -L 8000:localhost:8000 <user>@<server-ip>
+```
+
+`-N` opens the tunnel without a shell, so the command produces no output and appears to hang — that is correct. Leave it running and open:
+
+```
+http://localhost:8000/thermal/calibrate
+```
+
+Notes:
+- The URL is `localhost` on your own machine. The server's LAN address (e.g. `192.168.0.2`) is not reachable from outside its network.
+- Use `http://`, not `https://` — uvicorn serves plain HTTP. Because this is `localhost`, no browser HSTS upgrade applies.
+- If local port 8000 is taken, `ssh` fails with `bind: Address already in use`. Change the left-hand port: `-L 8080:localhost:8000`, then browse to `localhost:8080`.
+- Connecting through a jump host: keep the `-J` flag as well — `ssh -N -J <jump> -L 8000:localhost:8000 <user>@<server-ip>`.
+- The tunnel dies with the SSH session, so keep that terminal open.
+
+This does **not** replace ngrok for the Pi, which needs a genuinely public plain-HTTP endpoint reachable without an SSH client.
+
 #### Exposing publicly via ngrok (no sudo required)
 
 Download ngrok into the repo directory:
@@ -68,9 +92,15 @@ tar -xzf ngrok-v3-stable-linux-amd64.tgz
 ./ngrok config add-authtoken <your-token>
 ```
 
-Run in background so it survives terminal disconnect:
+**`--scheme http` is required for the Pi**, not optional: the GSM modem uploader can't follow redirects or negotiate TLS, so the tunnel must serve plain HTTP with no https upgrade. The tradeoff is that plain HTTP tunnels are effectively unreachable from a browser if the domain is under a gTLD with mandatory HSTS preloading (e.g. `.dev`, `.app`) — the browser force-upgrades to https before ever making a request, and no site setting or HSTS-deletion can override a TLD-level preload entry. If you need browser access (e.g. for `/thermal` or `/config-help`) on such a domain, run a **second** ngrok agent against the same domain in default mode, which is https-capable. Both agents can run simultaneously against the same static domain, split by scheme — the Pi keeps using `http://`, browsers use `https://`.
+
+Run both as durable `systemd --user` services (survives reboots, crashes, and CLI/session disconnects — see `deploy/systemd/README.md` for why this matters over a plain `nohup ... &`):
 ```bash
-nohup ./ngrok http --scheme http 8000 > ~/ngrok.log 2>&1 &
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/ngrok-*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ngrok-http.service ngrok-https.service
+loginctl enable-linger "$USER"   # required, or both die on full logout
 ```
 
 Get the assigned public URL:
@@ -78,7 +108,7 @@ Get the assigned public URL:
 curl http://localhost:4040/api/tunnels
 ```
 
-> **Note:** The free ngrok URL changes every time ngrok restarts.
+> **Note:** If this account has a claimed static domain, the same public URL persists across restarts. Otherwise a free-tier random URL changes every time ngrok restarts.
 
 ## Endpoints
 
@@ -95,11 +125,30 @@ The `/upload` endpoint accepts `multipart/form-data` with:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `image` | file | JPEG or PNG (WebP accepted and converted) |
+| `image` | file | JPEG or PNG (WebP accepted and converted). Thermal-fused RGBA WebP is split into JPEG + thermal sidecar (see below). |
 | `device_id` | text | Identifier of the sending device |
 | `mode` | text | Recording mode (`image_motion`, `image_interval`) |
 | `motion_score` | text | Motion ratio that triggered capture |
 | `timestamp` | text | ISO 8601 capture time |
+| `format` | text | Format hint sent by the Pi (currently informational only) |
+| `thermal_min_c` | text | Minimum temperature (°C) in the thermal frame, if present |
+| `thermal_max_c` | text | Maximum temperature (°C) in the thermal frame, if present |
+| `thermal_avg_c` | text | Average temperature (°C) in the thermal frame, if present |
+
+Thermal-fused frames (RGBA WebP — visible image in RGB, normalized thermal map in alpha) are
+split on receipt: the RGB is saved as a normal JPEG to `uploads/`, and the alpha channel is
+saved as `thermal/<stem>_thermal.png` with a `thermal/<stem>_thermal.json` sidecar carrying
+`thermal_min_c`/`max_c`/`avg_c` (needed to reconstruct real degrees from the 0-255 alpha).
+
+### Utilities
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/thermal` | Browse RGB/thermal capture pairs side by side, newest first — date + hour-of-day filters, paging, click-to-open overlay (`?start=&end=&hour_start=&hour_end=&page=&per_page=`) |
+| `GET` | `/thermal/image/{name}` | Serve a raw thermal PNG from `thermal/` |
+| `GET` | `/client-update/manifest` | Version/digest of the published client bundle, polled by field devices |
+| `GET` | `/client-update/bundle` | The published client bundle, base64-encoded for the devices' AT+HTTPREAD transport |
+| `GET` | `/config-help` | Interactive builder for `SET key=value` SMS config commands to the Pi |
 
 ### Annotation
 
@@ -167,6 +216,7 @@ models/
   runs/                 — Training run outputs (gitignored)
   archive/              — Superseded model versions (gitignored)
 uploads/                — All received images (gitignored)
+thermal/                — Thermal PNG + JSON sidecar split from RGBA uploads (gitignored)
 processed/              — YOLO inference outputs (gitignored)
 annotated/              — Human-confirmed label files (gitignored)
 dataset/                — Exported training dataset (gitignored)
@@ -187,6 +237,29 @@ All settings are in `config.py`:
 | `MODEL_CONF` | `0.25` | Inference confidence threshold |
 | `MODEL_IOU` | `0.45` | Inference IOU threshold |
 
+### Upload authentication
+
+`POST /upload` writes files to disk. It is guarded by a shared secret read from the
+`UPLOAD_TOKEN` environment variable — **not** from `config.py`, so the secret never lands in
+the repo.
+
+```bash
+# Generate one and put it in a .env file next to docker-compose.yml
+echo "UPLOAD_TOKEN=$(openssl rand -hex 24)" >> .env
+docker compose up -d
+```
+
+`.env` is gitignored; `.env.example` documents the variable and is committed. Running outside
+Docker, export it instead: `UPLOAD_TOKEN=... uvicorn app:app --host 0.0.0.0 --port 8000`.
+
+Give the Pi the same value as `upload_token` in its `client.json`. The client sends it as a
+`token` multipart field; an `X-Upload-Token` header is also accepted for anything that can set
+headers (`curl`, tests). A request without it gets `401`.
+
+> **If `UPLOAD_TOKEN` is empty the endpoint is unauthenticated** and logs a warning at startup.
+> That is tolerable only while the server has no route from the internet. Set it before
+> forwarding a public port or handing out a tunnel URL.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -195,4 +268,7 @@ All settings are in `config.py`:
 | Training fails immediately | Windows DataLoader issue — `workers=0` is set by default |
 | YOLO saves to `runs/detect/...` | Ensure trainer uses absolute project path (already fixed) |
 | Port conflict | `uvicorn app:app --port 8001` |
+| Web UI unreachable remotely | Use an SSH tunnel: `ssh -N -L 8000:localhost:8000 <user>@<server-ip>`, then open `http://localhost:8000/...` |
+| ngrok bandwidth limit hit | Browser access does not need ngrok — use the SSH tunnel above. Only the Pi uploader still requires a public tunnel |
+| Uploads returning `401` | `UPLOAD_TOKEN` on the server and `upload_token` in the Pi's `client.json` disagree, or one is unset |
 | CUDA not detected | Reinstall PyTorch with CUDA: `pip install torch --index-url https://download.pytorch.org/whl/nightly/cu126` |
