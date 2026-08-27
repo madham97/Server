@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from datetime import date, datetime, timezone
@@ -6,18 +7,58 @@ from urllib.parse import urlencode
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from config import THERMAL_DIR, UPLOAD_DIR
 from thermal_align import (SENSOR_FRAME_SIZE, capture_timestamp, find_profile_for_timestamp,
                             scale_to_reference)
-from thermal_color import colorize
+from thermal_color import RENDER_VERSION, colorize
 
 router = APIRouter(prefix="/thermal")
 
 DEFAULT_PER_PAGE = 24
 MAX_PER_PAGE = 200
+
+# A rendered frame is cached for a year and only ever replaced by a new URL, so every input that
+# can change the picture has to be in that URL: see _image_version.
+_IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
+# Someone linking /thermal/image/... by hand gets no version to pin, so their copy has to be
+# allowed to go stale for minutes rather than for a day.
+_UNVERSIONED_CACHE = "public, max-age=300"
+
+
+def _render_inputs(name: str) -> list[Path]:
+    """Every stored file the render of `name` reads.
+
+    An aligned frame depends on its source frame as well as itself: the source sets the colour
+    scale and the footprint mask, so re-aligning after a recalibration and repairing a source
+    frame must both change the URL."""
+    paths = [THERMAL_DIR / name]
+    if name.endswith("_thermal_aligned.png"):
+        paths.append(THERMAL_DIR / f"{_stem_of(name)}_thermal.png")
+    return paths
+
+
+def _image_version(name: str) -> str:
+    """The cache key for a rendered thermal frame: the renderer's fingerprint over the stored
+    bytes it reads. Changing the colour pipeline or rewriting a frame on disk both produce a new
+    token, and nothing else does."""
+    digest = hashlib.blake2b(digest_size=8)
+    digest.update(RENDER_VERSION.encode())
+    for path in _render_inputs(name):
+        try:
+            st = path.stat()
+            digest.update(f"{path.name}:{st.st_mtime_ns}:{st.st_size}".encode())
+        except OSError:
+            digest.update(f"{path.name}:missing".encode())
+    return digest.hexdigest()
+
+
+def image_url(name: str) -> str:
+    """A thermal image URL carrying the version of the render it points at."""
+    return f"/thermal/image/{name}?v={_image_version(name)}"
+
 
 # Sidecars are named "<prefix>_YYYYMMDDTHHMMSSZ_thermal.json" by the uploader, so the capture
 # date is readable straight off the filename — date filtering never has to open 10k JSON files.
@@ -405,7 +446,8 @@ async def thermal_view(
         has_rgb = (UPLOAD_DIR / source_image).exists() if source_image else False
         has_aligned = (THERMAL_DIR / aligned_png).exists()
         rgb_url = f"/annotate/image/{source_image}" if has_rgb else ""
-        aligned_url = f"/thermal/image/{aligned_png}" if has_aligned else ""
+        thermal_url = image_url(thermal_png)
+        aligned_url = image_url(aligned_png) if has_aligned else ""
         temps = (f"{meta.get('thermal_min_c', '?')}&ndash;{meta.get('thermal_max_c', '?')}&deg;C "
                  f"(avg {meta.get('thermal_avg_c', '?')}&deg;C)")
         rgb_side = (
@@ -417,12 +459,12 @@ async def thermal_view(
             if has_aligned else '<div class="missing">not aligned yet</div><p>aligned</p>'
         )
         cards.append(f"""
-<div class="card" data-stem="{stem}" data-rgb="{rgb_url}" data-thermal="/thermal/image/{thermal_png}"
+<div class="card" data-stem="{stem}" data-rgb="{rgb_url}" data-thermal="{thermal_url}"
      data-aligned="{aligned_url}"
      data-info="{meta.get('device_id', '')} &middot; {meta.get('timestamp', '')} &middot; {temps}">
   <div class="pair">
     <div>{rgb_side}</div>
-    <div><img class="thermal" data-role="thermal" src="/thermal/image/{thermal_png}" loading="lazy"><p>thermal</p></div>
+    <div><img class="thermal" data-role="thermal" src="{thermal_url}" loading="lazy"><p>thermal</p></div>
     <div>{aligned_side}</div>
   </div>
   <div class="meta">
@@ -492,7 +534,8 @@ def _stored_aligned_mask(name: str, out_shape: tuple[int, ...]) -> np.ndarray | 
 
 
 def _encode_png(img: np.ndarray, name: str, color: bool,
-                mask: np.ndarray | None = None) -> Response:
+                mask: np.ndarray | None = None,
+                headers: dict[str, str] | None = None) -> Response:
     """Encode a thermal frame for the browser, on the blue->red temperature scale unless the
     caller asked for the raw stored bytes. See thermal_color for why the raw form reads black."""
     if color:
@@ -501,11 +544,11 @@ def _encode_png(img: np.ndarray, name: str, color: bool,
     ok, buf = cv2.imencode(".png", img)
     if not ok:
         raise HTTPException(status_code=500, detail="Could not encode thermal frame")
-    return Response(content=buf.tobytes(), media_type="image/png",
-                    headers={"Cache-Control": "public, max-age=86400"})
+    return Response(content=buf.tobytes(), media_type="image/png", headers=headers or {})
 
 
-def _native_png(path: Path, name: str, color: bool = True) -> Response:
+def _native_png(path: Path, name: str, color: bool = True,
+                headers: dict[str, str] | None = None) -> Response:
     """The frame as the sensor actually sampled it, rather than as it was stored.
 
     Every capture before native transport was upsampled from 80x62 to the visible frame's size
@@ -529,7 +572,8 @@ def _native_png(path: Path, name: str, color: bool = True) -> Response:
         geometry = _aligned_homography(stem, SENSOR_FRAME_SIZE[::-1]) if raw is not None else None
         if geometry is None:
             # Nothing to re-derive it from; the stored aligned frame is all there is.
-            return _encode_png(img, name, color, mask=_stored_aligned_mask(name, img.shape))
+            return _encode_png(img, name, color, mask=_stored_aligned_mask(name, img.shape),
+                               headers=headers)
         if (raw.shape[1], raw.shape[0]) != SENSOR_FRAME_SIZE:
             raw = cv2.resize(raw, SENSOR_FRAME_SIZE, interpolation=cv2.INTER_AREA)
         H, ref_size = geometry
@@ -543,22 +587,39 @@ def _native_png(path: Path, name: str, color: bool = True) -> Response:
         # interpolated value happened to land on that pixel.
         img = cv2.resize(img, SENSOR_FRAME_SIZE, interpolation=cv2.INTER_AREA)
 
-    return _encode_png(img, name, color, mask=mask)
+    return _encode_png(img, name, color, mask=mask, headers=headers)
 
 
 @router.get("/image/{name}")
-async def thermal_image(name: str, native: bool = False, color: bool = True):
+async def thermal_image(request: Request, name: str, native: bool = False,
+                        color: bool = True, v: str | None = None):
     """Serve a thermal PNG. `native=1` returns it on the sensor's own 80x62 grid instead of the
     interpolated form it is stored in — see `_native_png`. `color=0` returns the raw stored
-    bytes instead of the temperature-scaled render — see thermal_color."""
+    bytes instead of the temperature-scaled render — see thermal_color.
+
+    `v` is the render version the caller pinned (see `image_url`). It selects nothing: the render
+    is always current, and the parameter exists so that changing the colour pipeline or rewriting
+    a frame on disk moves every page's image URLs and retires the cached copies. A request that
+    carries one can therefore be cached forever; one that does not gets minutes."""
     path = (THERMAL_DIR / name).resolve()
     if not path.is_relative_to(THERMAL_DIR.resolve()) or not path.exists():
         raise HTTPException(status_code=404, detail="Thermal image not found")
+
+    # The variants are separate pictures of the same capture, so they need separate validators.
+    etag = f'"{_image_version(name)}-{int(native)}{int(color)}"'
+    cache = _IMMUTABLE_CACHE if v else _UNVERSIONED_CACHE
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": cache})
+    headers = {"ETag": etag, "Cache-Control": cache}
+
     if native:
-        return _native_png(path, name, color=color)
+        return _native_png(path, name, color=color, headers=headers)
     if not color:
-        return FileResponse(str(path), media_type="image/png")
+        # Untouched bytes off disk; FileResponse derives its own validator from the file.
+        return FileResponse(str(path), media_type="image/png",
+                            headers={"Cache-Control": cache})
     img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if img is None:
         raise HTTPException(status_code=404, detail="Thermal image not readable")
-    return _encode_png(img, name, True, mask=_stored_aligned_mask(name, img.shape))
+    return _encode_png(img, name, True, mask=_stored_aligned_mask(name, img.shape),
+                       headers=headers)

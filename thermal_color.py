@@ -17,7 +17,9 @@ Letting a warped frame pick its own range is what made the aligned pane disagree
 pane beside it; see `colorize`.
 """
 
+import hashlib
 import json
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -64,6 +66,28 @@ def _build_lut() -> np.ndarray:
 
 
 LUT = _build_lut()
+
+
+def _render_version() -> str:
+    """A fingerprint of the code that decides what a thermal frame looks like.
+
+    /thermal/image renders on every request, so changing a colour stop, a percentile, or the
+    aligned-frame masking changes what a URL returns without changing the URL. The renders are
+    cached hard in the browser, which otherwise goes on serving the old picture for as long as
+    the max-age says — the reason the first pass at the aligned colour scale appeared fixed in
+    a fresh tab and unfixed in one that had already loaded the page. Folding this into the cache
+    key means a deploy invalidates exactly the frames whose appearance actually changed.
+    """
+    digest = hashlib.blake2b(digest_size=6)
+    for path in (Path(__file__), Path(__file__).parent / "routers" / "thermal_view.py"):
+        try:
+            digest.update(path.read_bytes())
+        except OSError:  # running from a layout where the router is elsewhere; version the rest
+            digest.update(b"?")
+    return digest.hexdigest()
+
+
+RENDER_VERSION = _render_version()
 
 
 def norm_window(stem: str) -> tuple[float, float]:
