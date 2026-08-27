@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from config import THERMAL_DIR, UPLOAD_DIR
 from thermal_align import (SENSOR_FRAME_SIZE, capture_timestamp, find_profile_for_timestamp,
                             scale_to_reference)
+from thermal_color import colorize
 
 router = APIRouter(prefix="/thermal")
 
@@ -435,7 +436,76 @@ async def thermal_view(
             + pager + _LIGHTBOX + _PAGE_TAIL)
 
 
-def _native_png(path: Path, name: str) -> Response:
+def _stem_of(name: str) -> str:
+    """The capture stem a thermal filename belongs to, so its sidecar can be found."""
+    for suffix in ("_thermal_aligned.png", "_thermal.png"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return Path(name).stem
+
+
+def _aligned_homography(stem: str, src_shape: tuple[int, ...]) -> tuple[np.ndarray, tuple[int, int]] | None:
+    """The transform `align_thermal` used for this capture, and the grid it lands on — the
+    capture's own profile, not merely the newest one, so a frame from before a camera move keeps
+    the geometry it was actually aligned with. None when no profile covers the capture."""
+    timestamp = capture_timestamp(stem)
+    profile = find_profile_for_timestamp(timestamp) if timestamp else None
+    if profile is None:
+        return None
+    H = np.array(profile["homography"], dtype=np.float64)
+    ref_w, ref_h = profile.get("ref_size") or (1920, 1080)
+    h, w = src_shape[:2]
+    if (w, h) != (ref_w, ref_h):
+        H = H @ scale_to_reference(w, h, ref_w, ref_h)
+    return H, (ref_w, ref_h)
+
+
+def _aligned_footprint(H: np.ndarray, src_shape: tuple[int, ...], out_size: tuple[int, int]) -> np.ndarray:
+    """Which output pixels an aligned frame actually holds a measurement for, taken from the warp
+    geometry by sending an opaque source frame through the same transform.
+
+    Not `pixel > 0`: the stored aligned frame is a *cubic* resample of the sensor grid against
+    zero padding, so instead of stepping to zero at the quad edge it ramps down through a band
+    about one sensor cell wide — 24 px at the 80x62 -> 1920x1080 scale. Every value in that ramp
+    is nonzero, so the value test kept ~24,500 padding pixels per frame and fed them to the
+    percentile clip, which is what flattened the aligned pane's colour scale."""
+    h, w = src_shape[:2]
+    opaque = np.full((h, w), 255, dtype=np.uint8)
+    return cv2.warpPerspective(opaque, H, out_size, flags=cv2.INTER_NEAREST) > 0
+
+
+def _stored_aligned_mask(name: str, out_shape: tuple[int, ...]) -> np.ndarray | None:
+    """The footprint of a stored `*_thermal_aligned.png`, re-derived from its source frame and
+    profile. None when either is gone, leaving `colorize` its `pixel > 0` fallback."""
+    if not name.endswith("_thermal_aligned.png"):
+        return None
+    stem = _stem_of(name)
+    source = cv2.imread(str(THERMAL_DIR / f"{stem}_thermal.png"), cv2.IMREAD_GRAYSCALE)
+    if source is None:
+        return None
+    geometry = _aligned_homography(stem, source.shape)
+    if geometry is None:
+        return None
+    H, _ = geometry
+    out_h, out_w = out_shape[:2]
+    return _aligned_footprint(H, source.shape, (out_w, out_h))
+
+
+def _encode_png(img: np.ndarray, name: str, color: bool,
+                mask: np.ndarray | None = None) -> Response:
+    """Encode a thermal frame for the browser, on the blue->red temperature scale unless the
+    caller asked for the raw stored bytes. See thermal_color for why the raw form reads black."""
+    if color:
+        img = colorize(img, _stem_of(name), aligned=name.endswith("_thermal_aligned.png"),
+                       mask=mask)
+    ok, buf = cv2.imencode(".png", img)
+    if not ok:
+        raise HTTPException(status_code=500, detail="Could not encode thermal frame")
+    return Response(content=buf.tobytes(), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+def _native_png(path: Path, name: str, color: bool = True) -> Response:
     """The frame as the sensor actually sampled it, rather than as it was stored.
 
     Every capture before native transport was upsampled from 80x62 to the visible frame's size
@@ -452,43 +522,43 @@ def _native_png(path: Path, name: str) -> Response:
     if img is None:
         raise HTTPException(status_code=404, detail="Thermal image not readable")
 
+    mask = None
     if name.endswith("_thermal_aligned.png"):
         stem = name.removesuffix("_thermal_aligned.png")
-        source = THERMAL_DIR / f"{stem}_thermal.png"
-        timestamp = capture_timestamp(stem)
-        profile = find_profile_for_timestamp(timestamp) if timestamp else None
-        if not source.exists() or profile is None:
+        raw = cv2.imread(str(THERMAL_DIR / f"{stem}_thermal.png"), cv2.IMREAD_GRAYSCALE)
+        geometry = _aligned_homography(stem, SENSOR_FRAME_SIZE[::-1]) if raw is not None else None
+        if geometry is None:
             # Nothing to re-derive it from; the stored aligned frame is all there is.
-            return FileResponse(str(path), media_type="image/png")
-        raw = cv2.imread(str(source), cv2.IMREAD_GRAYSCALE)
-        if raw is None:
-            return FileResponse(str(path), media_type="image/png")
+            return _encode_png(img, name, color, mask=_stored_aligned_mask(name, img.shape))
         if (raw.shape[1], raw.shape[0]) != SENSOR_FRAME_SIZE:
             raw = cv2.resize(raw, SENSOR_FRAME_SIZE, interpolation=cv2.INTER_AREA)
-        H = np.array(profile["homography"], dtype=np.float64)
-        ref_w, ref_h = profile.get("ref_size") or (1920, 1080)
-        H = H @ scale_to_reference(SENSOR_FRAME_SIZE[0], SENSOR_FRAME_SIZE[1], ref_w, ref_h)
-        img = cv2.warpPerspective(raw, H, (ref_w, ref_h), flags=cv2.INTER_NEAREST)
+        H, ref_size = geometry
+        img = cv2.warpPerspective(raw, H, ref_size, flags=cv2.INTER_NEAREST)
+        # Nearest sampling leaves no ramp, but a genuine zero-byte measurement would drop out of
+        # a `pixel > 0` test; the geometric footprint keeps it.
+        mask = _aligned_footprint(H, SENSOR_FRAME_SIZE[::-1], ref_size)
     elif (img.shape[1], img.shape[0]) != SENSOR_FRAME_SIZE:
         # INTER_AREA, not NEAREST: averaging each output cell over the block it came from
         # inverts the device's cubic upsample, where point-sampling would keep whichever
         # interpolated value happened to land on that pixel.
         img = cv2.resize(img, SENSOR_FRAME_SIZE, interpolation=cv2.INTER_AREA)
 
-    ok, buf = cv2.imencode(".png", img)
-    if not ok:
-        raise HTTPException(status_code=500, detail="Could not encode native thermal frame")
-    return Response(content=buf.tobytes(), media_type="image/png",
-                    headers={"Cache-Control": "public, max-age=86400"})
+    return _encode_png(img, name, color, mask=mask)
 
 
 @router.get("/image/{name}")
-async def thermal_image(name: str, native: bool = False):
+async def thermal_image(name: str, native: bool = False, color: bool = True):
     """Serve a thermal PNG. `native=1` returns it on the sensor's own 80x62 grid instead of the
-    interpolated form it is stored in — see `_native_png`."""
+    interpolated form it is stored in — see `_native_png`. `color=0` returns the raw stored
+    bytes instead of the temperature-scaled render — see thermal_color."""
     path = (THERMAL_DIR / name).resolve()
     if not path.is_relative_to(THERMAL_DIR.resolve()) or not path.exists():
         raise HTTPException(status_code=404, detail="Thermal image not found")
     if native:
-        return _native_png(path, name)
-    return FileResponse(str(path), media_type="image/png")
+        return _native_png(path, name, color=color)
+    if not color:
+        return FileResponse(str(path), media_type="image/png")
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise HTTPException(status_code=404, detail="Thermal image not readable")
+    return _encode_png(img, name, True, mask=_stored_aligned_mask(name, img.shape))
