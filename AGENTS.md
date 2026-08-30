@@ -13,8 +13,10 @@ train → promote loop for building custom models.
 Two classes: `rat` and `human` (`classes.json`).
 
 This is one half of a two-repo system. The other half is **`Rodent-client`** (the Pi-side
-recorder/uploader), which talks to this server over a SIM800 GSM modem at ~1.8 KB/s with no
-inbound route. That constraint explains most of the odd-looking design decisions here — base64
+recorder/uploader) — checked out at `/home/haamer/Rodent-client` on sentinel-compute, with its
+own `AGENTS.md`. Read that file before changing anything on the wire; it documents the client
+side of the same contract. The client talks to this server over a SIM800 GSM modem at
+~1.8 KB/s with no inbound route. That constraint explains most of the odd-looking design decisions here — base64
 bundles, multipart tokens, 80×62 thermal frames. When a change touches the wire format of
 `/upload` or `/client-update/*`, the client repo has to change with it.
 
@@ -32,6 +34,9 @@ failure modes that look like reasonable "improvements" from the code alone.
 | [inference.py](inference.py) | YOLO predict wrapper; also a CLI |
 | [trainer.py](trainer.py) | Training daemon thread + status under a `threading.Lock` |
 | [thermal_align.py](thermal_align.py) | Calibration profiles, homography/affine fitting, warping, corruption detection. Also a CLI (`calibrate`, `align`, `auto-calibrate`) |
+| [thermal_color.py](thermal_color.py) | Decodes stored 0-255 thermal bytes back to °C and re-renders them. Owns the `thermal_norm_*` invariant below — read it before touching any thermal display path |
+| [repair_squashed_thermal.py](repair_squashed_thermal.py) | One-off archive repair for frames stored 62×80 by the Aug 2026 `fpa_shape` axis bug. Its docstring is the reference for that failure |
+| `Dockerfile`, `docker-compose.yml` | Deployment. Code is baked into the image; only data dirs and logs are mounted |
 | [routers/](routers/) | One module per endpoint group; all mounted in `app.py` |
 | [static/](static/) | `annotate.html`, `thermal_calibrate.html` — single-page UIs, no build step |
 | [docs/](docs/) | `architecture.md`, `api.md`, `decisions.md`, `models.md` + published HTML decks/viewers |
@@ -42,6 +47,13 @@ Runtime data directories (`uploads/`, `thermal/`, `processed/`, `annotated/`, `f
 is gitignored except for `profiles.json`, which is committed.
 
 ## Running
+
+**Check `hostname` first — this repo exists in two places.** There is a Windows development
+checkout, and there is `/home/haamer/Server` on the deployment host itself (`sentinel-compute`),
+which is very likely where you are reading this. On sentinel-compute the server is already
+running as the `server-server-1` container holding port 8000: do **not** run the uvicorn line
+below there — it will fail to bind, or worse, race the live process over the same data
+directories. Use `docker compose` there, and read logs with `docker compose logs -f`.
 
 Development (Windows, from repo root):
 
@@ -118,6 +130,27 @@ what you measured. Do not report a change as working because it imports cleanly.
   that way; they share a dark monospace look.
 - Timestamps are UTC ISO 8601 (`YYYY-MM-DDTHH:MM:SSZ`); capture stems carry `YYYYMMDDTHHMMSSZ`,
   which several code paths parse straight off the filename to avoid opening thousands of sidecars.
+
+## Cross-repo changes
+
+`/upload` and `/client-update/*` are a contract with the `Rodent-client` fleet, and the fleet is
+the half you cannot reach to fix — over GSM the device only ever pulls. So the order matters:
+
+1. **Change the server first, backward-compatible with the bundle the fleet is running now.**
+   A field the current client does not send must not become required.
+2. **Then publish the client change** with `scripts/build-update-bundle.sh` *in the client repo*
+   — that is the only path that compile-checks, runs the offline test gate, and prints the
+   digest. Do not hand-write a `.tgz` into `client_updates/`; it skips all three.
+3. **Let probation prove it.** The device promotes an update only after a completed upload, and
+   `monitoring-pipeline-update-watchdog` rolls it back otherwise.
+
+Only then drop the compatibility shim, once every device has confirmed.
+
+`GET /client-update/manifest` serves the bundle in `client_updates/` with the newest **mtime**
+(not the newest filename — [routers/client_update.py:25](routers/client_update.py#L25)), so
+removing a bundle rolls the fleet back to the one before it, and anything that rewrites mtimes
+in that directory silently re-elects a bundle. The client's `AGENTS.md` carries the multipart
+field list.
 
 ## Known sharp edges
 
