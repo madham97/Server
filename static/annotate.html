@@ -87,6 +87,41 @@
 
     #canvas { cursor: crosshair; display: block; }
 
+    /* The aligned thermal frame sits in the same coordinate space as the RGB image, so
+       showing it alongside lets a warm body be checked against what is visible in the
+       photo — which is the whole point on frames where the animal is in shadow. */
+    #thermal-pane {
+      width: 34%;
+      min-width: 260px;
+      background: #111;
+      border-left: 1px solid #444;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 8px;
+      gap: 6px;
+    }
+
+    #thermal-pane.on { display: flex; }
+    #thermal-pane img { max-width: 100%; max-height: calc(100% - 28px); display: block; border-radius: 4px; }
+    #thermal-label { font-size: 12px; color: #888; text-align: center; }
+    #thermal-label b { color: #7cf; font-weight: 600; }
+    #thermal-missing { font-size: 12px; color: #a66; display: none; }
+
+    #thermal-toggle {
+      padding: 4px 10px;
+      background: #444;
+      border: 1px solid #555;
+      border-radius: 4px;
+      color: #ccc;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    #thermal-toggle:hover { background: #555; }
+    #thermal-toggle.on { border-color: #4af; color: #7cf; }
+
     #empty-msg {
       color: #666;
       font-size: 18px;
@@ -173,6 +208,7 @@
   <label id="shuffle-label">
     <input type="checkbox" id="shuffle-checkbox" checked /> Random
   </label>
+  <button id="thermal-toggle" class="on" title="Show or hide the aligned thermal frame">thermal</button>
   <span id="stats"></span>
 </div>
 
@@ -180,6 +216,12 @@
   <div id="canvas-wrap">
     <canvas id="canvas"></canvas>
     <div id="empty-msg">No images pending annotation</div>
+  </div>
+
+  <div id="thermal-pane">
+    <img id="thermal-img" alt="Aligned thermal frame for this capture">
+    <div id="thermal-missing">No thermal frame for this capture</div>
+    <div id="thermal-label">aligned thermal &middot; <b>blue cool &rarr; red/white warm</b></div>
   </div>
 
   <div id="sidebar">
@@ -221,7 +263,14 @@
 
   async function init() {
     await loadStats();
-    await loadNext();
+    // ?image=<name> opens one specific capture, so a shortlist can be handed out as links
+    // rather than as filenames to paste into the search box.
+    const requested = new URLSearchParams(location.search).get('image');
+    if (requested) {
+      await loadSpecific(requested);
+    } else {
+      await loadNext();
+    }
   }
 
   async function loadStats() {
@@ -243,6 +292,30 @@
     canvas.style.display = 'block';
     img.onload = () => { fitCanvas(); render(); };
     img.src = url;
+    showThermalFor(imageName);
+  }
+
+  // The thermal frame is stored under the capture stem, not the image filename, and only
+  // captures that arrived as RGBA have one — so a miss here is normal, not an error.
+  function showThermalFor(imageName) {
+    const stem = imageName.replace(/\.[^.]+$/, '');
+    const el = document.getElementById('thermal-img');
+    const missing = document.getElementById('thermal-missing');
+    const label = document.getElementById('thermal-label');
+    el.style.display = 'none';
+    missing.style.display = 'none';
+    label.style.display = 'none';
+    el.onload = () => {
+      el.style.display = 'block';
+      label.style.display = 'block';
+      missing.style.display = 'none';
+    };
+    el.onerror = () => {
+      el.style.display = 'none';
+      label.style.display = 'none';
+      missing.style.display = 'block';
+    };
+    el.src = `/thermal/image/${encodeURIComponent(stem)}_thermal_aligned.png`;
   }
 
   async function loadNext() {
@@ -439,6 +512,12 @@
     await loadStats();
     await loadNext();
   }
+
+  document.getElementById('thermal-toggle').addEventListener('click', e => {
+    const on = document.getElementById('thermal-pane').classList.toggle('on');
+    e.currentTarget.classList.toggle('on', on);
+    if (img.complete && img.naturalWidth) { fitCanvas(); render(); }
+  });
 
   document.getElementById('btn-submit').addEventListener('click', () => submit(boxes));
   document.getElementById('btn-no-detection').addEventListener('click', () => submit([]));
